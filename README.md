@@ -1,6 +1,6 @@
 # Raccoon
 
-Raccoon is a read-only, performance-focused Git TUI for reaching and inspecting diffs quickly. It targets Ghostty true color while remaining portable through Crossterm.
+Raccoon is a performance-focused Git TUI for reaching and inspecting diffs quickly. It opens on uncommitted changes by default, with changed files in a compact tree sidebar and most of the terminal dedicated to the diff preview. It targets Ghostty true color while remaining portable through Crossterm.
 
 Repository and Material-style file icons use Nerd Font glyphs. Configure Ghostty or
 your terminal with a Nerd Font for the intended appearance.
@@ -53,9 +53,12 @@ Paths are interpreted relative to the invocation directory, or relative to the s
 
 ### Uncommitted changes
 
-- `Tab`, `←`, `→`: switch between staged and unstaged files
+- Working-tree files appear under `CHANGES`; indexed files appear under `STAGED CHANGES`
+- Both sections use expanded directory trees and share one continuous selection
 - `j`, `k`, arrows, Page Up/Down: move selection
-- `Enter`: inspect the selected changed file
+- Selecting a file updates the large diff preview automatically
+- `Enter`: focus the selected diff
+- `D`: confirm discarding all tracked working-tree changes; staged changes and untracked files are kept
 - `h`: return to history
 - `b`: open the branch picker
 - `r`: refresh repository data
@@ -75,10 +78,12 @@ Paths are interpreted relative to the invocation directory, or relative to the s
 - `]`, `[`: next/previous file
 - `/`: search; `s`/`S`: next/previous result
 - `b` or `Esc`: return to the dashboard
+- `B`: open the branch picker when the diff was opened from the dashboard
 - `t`: preview themes
 - `q`: quit
 
 Git operations and syntax highlighting run in bounded background workers. Semantic diff coloring appears before syntax highlighting completes.
+Raw patch syntax such as `diff --git`, `index`, `---`, `+++`, `@@` coordinates, and leading patch markers is hidden in the UI. Color and line-number placement distinguish additions from deletions, keeping the viewport focused on code and its surrounding context.
 
 ## Themes
 
@@ -98,7 +103,7 @@ The semantic mappings keep rendering independent of a specific palette. For exam
 
 ## Safety and scope
 
-Raccoon is read-only. Branch selection never checks out or modifies a branch. Stashes, tags, reflog, worktrees, light themes, and general Git feature parity are intentionally out of scope.
+Raccoon is read-only except for the explicit, confirmed `D` action in the changes workspace. That action restores tracked working-tree files to their indexed versions; it does not alter staged changes or delete untracked files. Branch selection never checks out or modifies a branch. Stashes, tags, reflog, worktrees, light themes, and general Git feature parity are intentionally out of scope.
 
 ## Development
 

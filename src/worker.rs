@@ -34,6 +34,9 @@ pub enum GitCommand {
         revision: OsString,
         path: Option<PathBuf>,
     },
+    DiscardWorkingTree {
+        request_id: u64,
+    },
 }
 
 pub enum GitPayload {
@@ -44,6 +47,7 @@ pub enum GitPayload {
         revision: OsString,
         files: Vec<dashboard::ChangeEntry>,
     },
+    DiscardedWorkingTree,
 }
 
 pub struct GitResponse {
@@ -108,6 +112,20 @@ fn git_loop(repo: Repository, commands: Receiver<GitCommand>, responses: Sender<
                             files,
                         }
                     });
+                (request_id, result)
+            }
+            GitCommand::DiscardWorkingTree { request_id } => {
+                let output = repo.git(["restore", "--worktree", "--", "."]);
+                let result = output.and_then(|output| {
+                    if output.status.success() {
+                        Ok(GitPayload::DiscardedWorkingTree)
+                    } else {
+                        anyhow::bail!(
+                            "discard working-tree changes: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        )
+                    }
+                });
                 (request_id, result)
             }
         };
@@ -227,5 +245,76 @@ fn highlight_loop(commands: Receiver<HighlightCommand>, responses: Sender<Highli
         {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, process::Command, time::Duration};
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn discard_restores_index_and_keeps_staged_and_untracked_content() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {:?}: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Raccoon Test"]);
+        git(&["config", "user.email", "raccoon@example.test"]);
+        fs::write(root.join("tracked.txt"), "committed\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-qm", "initial"]);
+
+        fs::write(root.join("tracked.txt"), "staged\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        fs::write(root.join("tracked.txt"), "working tree\n").unwrap();
+        fs::write(root.join("untracked.txt"), "keep me\n").unwrap();
+
+        let worker = GitWorker::start(Repository::discover(root).unwrap());
+        worker
+            .request(GitCommand::DiscardWorkingTree { request_id: 7 })
+            .unwrap();
+        let response = worker
+            .responses
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        assert_eq!(response.request_id, 7);
+        assert!(matches!(
+            response.result.unwrap(),
+            GitPayload::DiscardedWorkingTree
+        ));
+        assert_eq!(
+            fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "staged\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("untracked.txt")).unwrap(),
+            "keep me\n"
+        );
+        let staged = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&staged.stdout).trim(),
+            "tracked.txt"
+        );
     }
 }

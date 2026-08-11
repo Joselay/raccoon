@@ -56,9 +56,6 @@ impl Colors<'_> {
     fn border(self) -> Color {
         self.color(self.theme.ui.border)
     }
-    fn selected(self) -> Color {
-        self.color(self.theme.ui.selection)
-    }
     fn selection_foreground(self) -> Color {
         self.color(self.theme.ui.selection_foreground)
     }
@@ -100,6 +97,7 @@ struct AppState {
     diff_error: Option<String>,
     highlighted: Option<HighlightedDiff>,
     highlight_message: Option<String>,
+    pending_change_preview: bool,
     diff_scroll: usize,
     branch_selection: usize,
     history_selection: usize,
@@ -112,6 +110,7 @@ struct AppState {
     unstaged_selection: usize,
     comparison_base: Option<OsString>,
     branch_picker: bool,
+    discard_confirmation: bool,
     themes: Vec<Theme>,
     theme_index: usize,
     confirmed_theme_index: usize,
@@ -127,10 +126,10 @@ struct AppState {
 
 impl AppState {
     fn new(target: &LaunchTarget, loaded_theme: LoadedTheme) -> Self {
-        let dashboard_page = if matches!(target, LaunchTarget::Changes) {
-            DashboardPage::Changes
-        } else {
+        let dashboard_page = if matches!(target, LaunchTarget::History { .. }) {
             DashboardPage::History
+        } else {
+            DashboardPage::Changes
         };
         let focus = if dashboard_page == DashboardPage::Changes {
             Focus::Unstaged
@@ -163,6 +162,7 @@ impl AppState {
             diff_error: None,
             highlighted: None,
             highlight_message: None,
+            pending_change_preview: false,
             diff_scroll: 0,
             branch_selection: 0,
             history_selection: 0,
@@ -175,6 +175,7 @@ impl AppState {
             unstaged_selection: 0,
             comparison_base: None,
             branch_picker,
+            discard_confirmation: false,
             themes,
             theme_index,
             confirmed_theme_index: theme_index,
@@ -203,6 +204,31 @@ impl AppState {
         let Some(data) = &self.data else {
             return false;
         };
+        if self.dashboard_page == DashboardPage::Changes {
+            let staged_len = data.staged.len();
+            let unstaged_len = data.unstaged.len();
+            let len = staged_len + unstaged_len;
+            let current = match self.focus {
+                Focus::Unstaged => self.unstaged_selection.min(unstaged_len.saturating_sub(1)),
+                Focus::Staged => {
+                    unstaged_len + self.staged_selection.min(staged_len.saturating_sub(1))
+                }
+                _ => 0,
+            };
+            let next = if len == 0 {
+                0
+            } else {
+                (current as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize
+            };
+            if next < unstaged_len {
+                self.focus = Focus::Unstaged;
+                self.unstaged_selection = next;
+            } else {
+                self.focus = Focus::Staged;
+                self.staged_selection = next.saturating_sub(unstaged_len);
+            }
+            return current != next;
+        }
         let (selection, len) = match self.focus {
             Focus::History => (&mut self.history_selection, data.commits.len()),
             Focus::CommitFiles => (&mut self.commit_file_selection, self.commit_files.len()),
@@ -216,7 +242,7 @@ impl AppState {
             *selection =
                 (*selection as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize;
         }
-        self.focus == Focus::History && previous != *selection
+        previous != *selection
     }
 
     fn cycle_focus(&mut self) {
@@ -283,11 +309,9 @@ impl AppState {
             .iter()
             .enumerate()
             .filter_map(|(index, line)| {
-                document
-                    .line_text(line)
-                    .to_lowercase()
-                    .contains(&query)
-                    .then_some(index)
+                (is_visible_diff_line(line.kind)
+                    && document.line_text(line).to_lowercase().contains(&query))
+                .then_some(index)
             })
             .collect();
         self.search_match_index = 0;
@@ -338,6 +362,7 @@ where
     let mut diff_request = None;
     let mut head_request = None;
     let mut commit_files_request = None;
+    let mut discard_request = None;
     let mut highlight_request = None;
     if needs_diff(&initial_target) {
         git_worker.request(GitCommand::Diff {
@@ -366,11 +391,18 @@ where
                 dashboard_request = None;
                 match response.result {
                     Ok(GitPayload::Dashboard(data)) => {
-                        if state.focus == Focus::Unstaged
-                            && data.unstaged.is_empty()
-                            && !data.staged.is_empty()
-                        {
-                            state.focus = Focus::Staged;
+                        if state.dashboard_page == DashboardPage::Changes {
+                            if state.focus == Focus::Unstaged
+                                && data.unstaged.is_empty()
+                                && !data.staged.is_empty()
+                            {
+                                state.focus = Focus::Staged;
+                            } else if state.focus == Focus::Staged
+                                && data.staged.is_empty()
+                                && !data.unstaged.is_empty()
+                            {
+                                state.focus = Focus::Unstaged;
+                            }
                         }
                         state.history_selection = state
                             .history_selection
@@ -396,10 +428,20 @@ where
                                 &mut commit_files_request,
                                 history_path.as_ref(),
                             )?;
+                        } else {
+                            request_change_preview(
+                                &mut state,
+                                &git_worker,
+                                &mut next_request_id,
+                                &mut diff_request,
+                            )?;
                         }
                     }
                     Ok(
-                        GitPayload::Diff(_) | GitPayload::Head(_) | GitPayload::CommitFiles { .. },
+                        GitPayload::Diff(_)
+                        | GitPayload::Head(_)
+                        | GitPayload::CommitFiles { .. }
+                        | GitPayload::DiscardedWorkingTree,
                     ) => {}
                     Err(error) => state.dashboard_error = Some(error.to_string()),
                 }
@@ -418,9 +460,37 @@ where
                     Ok(
                         GitPayload::Dashboard(_)
                         | GitPayload::Head(_)
-                        | GitPayload::CommitFiles { .. },
+                        | GitPayload::CommitFiles { .. }
+                        | GitPayload::DiscardedWorkingTree,
                     ) => {}
                     Err(error) => state.diff_error = Some(error.to_string()),
+                }
+                if state.pending_change_preview
+                    && matches!(state.screen, Screen::Dashboard)
+                    && state.dashboard_page == DashboardPage::Changes
+                {
+                    request_change_preview(
+                        &mut state,
+                        &git_worker,
+                        &mut next_request_id,
+                        &mut diff_request,
+                    )?;
+                }
+                dirty = true;
+            } else if Some(response.request_id) == discard_request {
+                discard_request = None;
+                match response.result {
+                    Ok(GitPayload::DiscardedWorkingTree) => {
+                        let request_id = next_request_id;
+                        next_request_id += 1;
+                        git_worker.request(GitCommand::Dashboard {
+                            request_id,
+                            history_path: history_path.clone(),
+                        })?;
+                        dashboard_request = Some(request_id);
+                    }
+                    Ok(_) => {}
+                    Err(error) => state.dashboard_error = Some(error.to_string()),
                 }
                 dirty = true;
             } else if Some(response.request_id) == head_request {
@@ -496,6 +566,7 @@ where
             || diff_request.is_some()
             || head_request.is_some()
             || commit_files_request.is_some()
+            || discard_request.is_some()
             || highlight_request.is_some();
         if !event::poll(if loading {
             Duration::from_millis(25)
@@ -513,6 +584,22 @@ where
         }
         if !state.theme_picker {
             state.theme_message = None;
+        }
+
+        if state.discard_confirmation {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('n') => state.discard_confirmation = false,
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    state.discard_confirmation = false;
+                    let request_id = next_request_id;
+                    next_request_id += 1;
+                    git_worker.request(GitCommand::DiscardWorkingTree { request_id })?;
+                    discard_request = Some(request_id);
+                }
+                _ => continue,
+            }
+            dirty = true;
+            continue;
         }
 
         if state.search_input {
@@ -681,14 +768,17 @@ where
             Screen::Dashboard => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Tab | KeyCode::Right | KeyCode::BackTab | KeyCode::Left => {
-                    state.cycle_focus()
+                    if state.dashboard_page == DashboardPage::History {
+                        state.cycle_focus();
+                    }
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
                     if state.move_selection(1) {
-                        select_commit_preview(
+                        refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
                             &mut next_request_id,
+                            &mut diff_request,
                             &mut commit_files_request,
                             history_path.as_ref(),
                         )?;
@@ -696,10 +786,11 @@ where
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     if state.move_selection(-1) {
-                        select_commit_preview(
+                        refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
                             &mut next_request_id,
+                            &mut diff_request,
                             &mut commit_files_request,
                             history_path.as_ref(),
                         )?;
@@ -707,10 +798,11 @@ where
                 }
                 KeyCode::PageDown => {
                     if state.move_selection(10) {
-                        select_commit_preview(
+                        refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
                             &mut next_request_id,
+                            &mut diff_request,
                             &mut commit_files_request,
                             history_path.as_ref(),
                         )?;
@@ -718,10 +810,11 @@ where
                 }
                 KeyCode::PageUp => {
                     if state.move_selection(-10) {
-                        select_commit_preview(
+                        refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
                             &mut next_request_id,
+                            &mut diff_request,
                             &mut commit_files_request,
                             history_path.as_ref(),
                         )?;
@@ -729,10 +822,11 @@ where
                 }
                 KeyCode::Home | KeyCode::Char('g') => {
                     if state.move_selection(isize::MIN) {
-                        select_commit_preview(
+                        refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
                             &mut next_request_id,
+                            &mut diff_request,
                             &mut commit_files_request,
                             history_path.as_ref(),
                         )?;
@@ -740,10 +834,11 @@ where
                 }
                 KeyCode::End | KeyCode::Char('G') => {
                     if state.move_selection(isize::MAX) {
-                        select_commit_preview(
+                        refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
                             &mut next_request_id,
+                            &mut diff_request,
                             &mut commit_files_request,
                             history_path.as_ref(),
                         )?;
@@ -751,6 +846,7 @@ where
                 }
                 KeyCode::Enter => {
                     if let Some(target) = state.selected_target() {
+                        state.pending_change_preview = false;
                         state.screen = Screen::Diff {
                             target: target.clone(),
                             direct: false,
@@ -798,6 +894,12 @@ where
                     } else {
                         Focus::Unstaged
                     };
+                    request_change_preview(
+                        &mut state,
+                        &git_worker,
+                        &mut next_request_id,
+                        &mut diff_request,
+                    )?;
                 }
                 KeyCode::Char('r') => {
                     state.dashboard_error = None;
@@ -809,18 +911,38 @@ where
                     })?;
                     dashboard_request = Some(request_id);
                 }
+                KeyCode::Char('D') if state.dashboard_page == DashboardPage::Changes => {
+                    let has_worktree_changes = state.data.as_ref().is_some_and(|data| {
+                        data.unstaged
+                            .iter()
+                            .any(|change| change.kind != ChangeKind::Untracked)
+                    });
+                    if has_worktree_changes {
+                        state.discard_confirmation = true;
+                    } else {
+                        state.theme_message =
+                            Some("No tracked working-tree changes to discard".to_owned());
+                    }
+                }
                 _ => continue,
             },
             Screen::Diff { direct, .. } => match key.code {
                 KeyCode::Char('q') => break,
+                KeyCode::Char('B') if state.data.is_some() => {
+                    state.pending_change_preview = false;
+                    state.branch_picker = true;
+                    state.comparison_base = None;
+                }
                 KeyCode::Esc | KeyCode::Char('b') if !direct => {
                     state.screen = Screen::Dashboard;
-                    state.diff = None;
-                    state.diff_error = None;
-                    state.highlighted = None;
-                    state.highlight_message = None;
-                    state.search_matches.clear();
-                    state.diff_scroll = 0;
+                    if state.dashboard_page == DashboardPage::Changes {
+                        request_change_preview(
+                            &mut state,
+                            &git_worker,
+                            &mut next_request_id,
+                            &mut diff_request,
+                        )?;
+                    }
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
                     state.diff_scroll = state.diff_scroll.saturating_add(1)
@@ -875,6 +997,64 @@ fn request_diff(
     worker.request(GitCommand::Diff { request_id, target })?;
     *current_request = Some(request_id);
     Ok(())
+}
+
+fn request_change_preview(
+    state: &mut AppState,
+    worker: &GitWorker,
+    next_request_id: &mut u64,
+    current_request: &mut Option<u64>,
+) -> Result<()> {
+    if !matches!(state.focus, Focus::Staged | Focus::Unstaged) {
+        return Ok(());
+    }
+    let Some(target) = state.selected_target() else {
+        state.pending_change_preview = false;
+        state.diff = None;
+        state.diff_error = None;
+        state.highlighted = None;
+        state.highlight_message = None;
+        return Ok(());
+    };
+    if current_request.is_some() {
+        // Keep only the newest selection while Git is busy. This makes rapid
+        // navigation responsive without filling the bounded worker queue.
+        state.pending_change_preview = true;
+        state.diff = None;
+        state.diff_error = None;
+        state.highlighted = None;
+        return Ok(());
+    }
+    state.pending_change_preview = false;
+    state.diff = None;
+    state.diff_error = None;
+    state.highlighted = None;
+    state.highlight_message = None;
+    state.search_matches.clear();
+    state.diff_scroll = 0;
+    request_diff(worker, next_request_id, current_request, target)
+}
+
+fn refresh_dashboard_preview(
+    state: &mut AppState,
+    worker: &GitWorker,
+    next_request_id: &mut u64,
+    diff_request: &mut Option<u64>,
+    commit_files_request: &mut Option<(u64, OsString)>,
+    history_path: Option<&std::path::PathBuf>,
+) -> Result<()> {
+    match state.dashboard_page {
+        DashboardPage::History => select_commit_preview(
+            state,
+            worker,
+            next_request_id,
+            commit_files_request,
+            history_path,
+        ),
+        DashboardPage::Changes => {
+            request_change_preview(state, worker, next_request_id, diff_request)
+        }
+    }
 }
 
 fn select_commit_preview(
@@ -944,7 +1124,7 @@ fn render(frame: &mut ratatui::Frame<'_>, repo: &Repository, state: &AppState) {
     .split(frame.area());
     let title = match &state.screen {
         Screen::Dashboard if state.dashboard_page == DashboardPage::History => "history",
-        Screen::Dashboard => "uncommitted changes",
+        Screen::Dashboard => "changes · diff workspace",
         Screen::Diff { target, .. } => target_name(target),
     };
     let repository_name = repo
@@ -989,13 +1169,13 @@ fn render(frame: &mut ratatui::Frame<'_>, repo: &Repository, state: &AppState) {
             " q quit  u changes  Tab panels  j/k move  Enter open  b branches  c compare  r refresh"
         }
         (Screen::Dashboard, DashboardPage::Changes) => {
-            " q quit  h history  Tab panels  j/k move  Enter open  b branches  c compare  r refresh"
+            " q quit  h history  j/k select  Enter diff  D discard changes  b branches  r refresh"
         }
         (Screen::Diff { direct: true, .. }, _) => {
             " q quit  j/k scroll  n/N hunks  [/] files  / search  s/S matches  t themes"
         }
         (Screen::Diff { direct: false, .. }, _) => {
-            " q quit  b/Esc back  j/k scroll  n/N hunks  [/] files  / search  s/S matches"
+            " q quit  b/Esc back  B branches  j/k scroll  n/N hunks  [/] files  / search"
         }
     };
     let search_prompt;
@@ -1018,6 +1198,9 @@ fn render(frame: &mut ratatui::Frame<'_>, repo: &Repository, state: &AppState) {
     }
     if state.theme_picker {
         render_theme_picker(frame, state);
+    }
+    if state.discard_confirmation {
+        render_discard_confirmation(frame, state);
     }
 }
 
@@ -1058,27 +1241,25 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState
         }
         DashboardPage::Changes => {
             let columns =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
                     .split(area);
-            render_changes(
-                frame,
-                columns[0],
-                "Staged",
-                state.staged_selection,
-                &data.staged,
-                state.focus == Focus::Staged,
-                colors,
-            );
-            render_changes(
-                frame,
-                columns[1],
-                "Unstaged",
-                state.unstaged_selection,
-                &data.unstaged,
-                state.focus == Focus::Unstaged,
-                colors,
-            );
+            render_unified_changes(frame, columns[0], state, data, colors);
+            render_change_preview(frame, columns[1], state);
         }
+    }
+}
+
+fn render_change_preview(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
+    if state.selected_target().is_none() {
+        let colors = state.colors();
+        frame.render_widget(
+            Paragraph::new("No changed file selected.\n\nYour working tree is clean.")
+                .style(Style::default().fg(colors.muted()).bg(colors.background()))
+                .block(diff_block(" Diff preview ", colors)),
+            area,
+        );
+    } else {
+        render_diff(frame, area, state);
     }
 }
 
@@ -1165,16 +1346,102 @@ fn render_commit_files(
     );
 }
 
-fn render_changes(
+fn render_unified_changes(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    title: &str,
-    selection: usize,
-    entries: &[ChangeEntry],
-    focused: bool,
+    state: &AppState,
+    data: &DashboardData,
     colors: Colors<'_>,
 ) {
-    render_change_tree(frame, area, title, focused, selection, entries, colors);
+    let mut rows = Vec::new();
+    append_change_section(
+        &mut rows,
+        "CHANGES",
+        Focus::Unstaged,
+        &data.unstaged,
+        colors,
+    );
+    append_change_section(
+        &mut rows,
+        "STAGED CHANGES",
+        Focus::Staged,
+        &data.staged,
+        colors,
+    );
+    let selected_entry_index = match state.focus {
+        Focus::Staged => selected_tree_entry_index(&data.staged, state.staged_selection),
+        Focus::Unstaged => selected_tree_entry_index(&data.unstaged, state.unstaged_selection),
+        _ => None,
+    };
+    let selected_row = selected_entry_index
+        .and_then(|entry_index| {
+            rows.iter().position(|row| {
+                row.scope == Some(state.focus) && row.entry_index == Some(entry_index)
+            })
+        })
+        .unwrap_or(0);
+    let lines = rows.into_iter().map(|row| row.line).collect::<Vec<_>>();
+    render_rows(
+        frame,
+        area,
+        format!(
+            "Changed files · {}",
+            data.staged.len() + data.unstaged.len()
+        ),
+        true,
+        selected_row,
+        &lines,
+        colors,
+    );
+}
+
+struct ScopedChangeTreeRow {
+    line: Line<'static>,
+    scope: Option<Focus>,
+    entry_index: Option<usize>,
+}
+
+fn append_change_section(
+    rows: &mut Vec<ScopedChangeTreeRow>,
+    title: &str,
+    scope: Focus,
+    entries: &[ChangeEntry],
+    colors: Colors<'_>,
+) {
+    if !rows.is_empty() {
+        rows.push(ScopedChangeTreeRow {
+            line: Line::raw(""),
+            scope: None,
+            entry_index: None,
+        });
+    }
+    rows.push(ScopedChangeTreeRow {
+        line: Line::styled(
+            format!("{title} · {}", entries.len()),
+            Style::default()
+                .fg(colors.muted())
+                .add_modifier(Modifier::BOLD),
+        ),
+        scope: None,
+        entry_index: None,
+    });
+    if entries.is_empty() {
+        rows.push(ScopedChangeTreeRow {
+            line: Line::styled("  (none)", Style::default().fg(colors.muted())),
+            scope: None,
+            entry_index: None,
+        });
+        return;
+    }
+    rows.extend(
+        change_tree_rows(entries, colors)
+            .into_iter()
+            .map(|row| ScopedChangeTreeRow {
+                line: row.line,
+                scope: row.entry_index.map(|_| scope),
+                entry_index: row.entry_index,
+            }),
+    );
 }
 
 #[derive(Default)]
@@ -1233,12 +1500,14 @@ fn build_change_tree(entries: &[ChangeEntry]) -> ChangeTreeNode {
 }
 
 fn selected_tree_entry(entries: &[ChangeEntry], selection: usize) -> Option<&ChangeEntry> {
+    selected_tree_entry_index(entries, selection).and_then(|entry_index| entries.get(entry_index))
+}
+
+fn selected_tree_entry_index(entries: &[ChangeEntry], selection: usize) -> Option<usize> {
     let root = build_change_tree(entries);
     let mut indexes = Vec::with_capacity(entries.len());
     append_change_tree_indexes(&root, &mut indexes);
-    indexes
-        .get(selection)
-        .and_then(|entry_index| entries.get(*entry_index))
+    indexes.get(selection).copied()
 }
 
 fn append_change_tree_indexes(node: &ChangeTreeNode, indexes: &mut Vec<usize>) {
@@ -1388,22 +1657,22 @@ fn render_rows<T: Into<String>>(
                     if selected { "› " } else { "  " },
                     if selected {
                         Style::default()
-                            .fg(colors.selection_foreground())
-                            .bg(colors.selected())
+                            .fg(colors.accent())
+                            .bg(colors.panel())
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(colors.muted()).bg(colors.panel())
                     },
                 ));
                 spans.extend(row.spans.iter().cloned().map(|mut span| {
-                    span.style = span.style.patch(if selected {
-                        Style::default()
-                            .fg(colors.selection_foreground())
-                            .bg(colors.selected())
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().bg(colors.panel())
-                    });
+                    let primary_text = selected && span.style.fg == Some(colors.foreground());
+                    let mut selection_style = Style::default().bg(colors.panel());
+                    if primary_text {
+                        selection_style = selection_style
+                            .fg(colors.accent())
+                            .add_modifier(Modifier::BOLD);
+                    }
+                    span.style = span.style.patch(selection_style);
                     span
                 }));
                 Line::from(spans)
@@ -1453,12 +1722,13 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
         let scroll = state
             .diff_scroll
             .min(document.lines.len().saturating_sub(available));
-        let title = diff_file_title(document, scroll);
+        let title = diff_file_title(document, scroll, diff_scope_label(state));
         let lines = document
             .lines
             .iter()
             .enumerate()
             .skip(scroll)
+            .filter(|(_, line)| is_visible_diff_line(line.kind))
             .take(available)
             .map(|(line_index, line)| {
                 let line_numbers = match (line.old_line, line.new_line) {
@@ -1503,13 +1773,14 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                     ),
                 ];
                 let text = document.line_text(line);
+                let content_offset = diff_content_offset(line.kind, text);
                 if !is_search_match {
                     if let Some(highlighted) = state
                         .highlighted
                         .as_ref()
                         .and_then(|highlighted| highlighted.lines.get(line_index))
                     {
-                        let mut offset = 0;
+                        let mut offset = content_offset;
                         for highlighted_span in highlighted {
                             if highlighted_span.range.start > offset {
                                 spans.push(Span::styled(
@@ -1529,10 +1800,10 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                             spans.push(Span::styled(&text[offset..], style));
                         }
                     } else {
-                        spans.push(Span::styled(text, style));
+                        spans.push(Span::styled(&text[content_offset..], style));
                     }
                 } else {
-                    spans.push(Span::styled(text, style));
+                    spans.push(Span::styled(&text[content_offset..], style));
                 }
                 // Paragraph truncates overflowing spans, so this paints the
                 // semantic background through the right edge of the viewport.
@@ -1584,7 +1855,7 @@ fn diff_block<'a>(title: &'a str, colors: Colors<'_>) -> Block<'a> {
         )
 }
 
-fn diff_file_title(document: &DiffDocument, scroll: usize) -> String {
+fn diff_file_title(document: &DiffDocument, scroll: usize, scope: Option<&str>) -> String {
     let Some(file_index) = document.lines.get(scroll).and_then(|line| line.file_index) else {
         return " Diff ".to_owned();
     };
@@ -1594,12 +1865,57 @@ fn diff_file_title(document: &DiffDocument, scroll: usize) -> String {
         .and_then(|path| path.as_deref())
         .map(|path| path.to_string_lossy())
         .unwrap_or_else(|| "<unknown file>".into());
+    let scope = scope.map(|scope| format!("{scope} · ")).unwrap_or_default();
     format!(
-        " File {}/{} — {} ",
+        " {scope}File {}/{} — {} ",
         file_index + 1,
         document.files.len(),
         path
     )
+}
+
+fn diff_scope_label(state: &AppState) -> Option<&'static str> {
+    match &state.screen {
+        Screen::Dashboard if state.dashboard_page == DashboardPage::Changes => match state.focus {
+            Focus::Staged => Some("Staged · HEAD → index"),
+            Focus::Unstaged => Some("Changes · index → working tree"),
+            _ => None,
+        },
+        Screen::Diff { target, .. } => match target {
+            LaunchTarget::Staged { .. } => Some("Staged · HEAD → index"),
+            LaunchTarget::WorkingTree { .. } => Some("Changes · index → working tree"),
+            _ => None,
+        },
+        Screen::Dashboard => None,
+    }
+}
+
+fn is_visible_diff_line(kind: LineKind) -> bool {
+    // Keep the viewport focused on reviewable changes. Git patch transport
+    // syntax and hunk coordinates remain in the parsed document for
+    // navigation, but are not rendered.
+    matches!(
+        kind,
+        LineKind::Addition
+            | LineKind::Deletion
+            | LineKind::Context
+            | LineKind::Binary
+            | LineKind::Rename
+            | LineKind::NewFile
+            | LineKind::DeletedFile
+    )
+}
+
+fn diff_content_offset(kind: LineKind, text: &str) -> usize {
+    if matches!(
+        kind,
+        LineKind::Addition | LineKind::Deletion | LineKind::Context
+    ) && !text.is_empty()
+    {
+        1
+    } else {
+        0
+    }
 }
 
 fn panel<'a>(
@@ -1739,11 +2055,6 @@ fn syntax_color(token: SyntaxToken, colors: Colors<'_>) -> Color {
 
 fn render_branch_picker(frame: &mut ratatui::Frame<'_>, content_area: Rect, state: &AppState) {
     let colors = state.colors();
-    frame.render_widget(Clear, content_area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(colors.background())),
-        content_area,
-    );
     let vertical = Layout::vertical([
         Constraint::Percentage(10),
         Constraint::Percentage(80),
@@ -1757,6 +2068,10 @@ fn render_branch_picker(frame: &mut ratatui::Frame<'_>, content_area: Rect, stat
     ])
     .split(vertical[1])[1];
     frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(colors.background())),
+        area,
+    );
     let Some(data) = &state.data else {
         frame.render_widget(
             panel(
@@ -1877,8 +2192,8 @@ fn render_theme_picker(frame: &mut ratatui::Frame<'_>, state: &AppState) {
                 ),
                 if index == state.theme_index {
                     Style::default()
-                        .fg(colors.selection_foreground())
-                        .bg(colors.selected())
+                        .fg(colors.accent())
+                        .bg(colors.background())
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -1897,6 +2212,56 @@ fn render_theme_picker(frame: &mut ratatui::Frame<'_>, state: &AppState) {
                 .style(Style::default().bg(colors.background())),
         ),
         inner,
+    );
+}
+
+fn render_discard_confirmation(frame: &mut ratatui::Frame<'_>, state: &AppState) {
+    let colors = state.colors();
+    let vertical = Layout::vertical([
+        Constraint::Percentage(35),
+        Constraint::Length(9),
+        Constraint::Percentage(35),
+    ])
+    .split(frame.area());
+    let area = Layout::horizontal([
+        Constraint::Percentage(22),
+        Constraint::Percentage(56),
+        Constraint::Percentage(22),
+    ])
+    .split(vertical[1])[1];
+    frame.render_widget(Clear, area);
+    let warning = colors.color(colors.theme.ui.warning);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                "Discard every tracked change in the CHANGES section?",
+                Style::default()
+                    .fg(colors.foreground())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(""),
+            Line::styled(
+                "Files will be restored to their staged versions.",
+                Style::default().fg(colors.muted()),
+            ),
+            Line::styled(
+                "Staged changes and untracked files will be kept.",
+                Style::default().fg(colors.muted()),
+            ),
+            Line::raw(""),
+            Line::styled(
+                "Enter/y confirm    Esc/n cancel",
+                Style::default().fg(warning),
+            ),
+        ])
+        .block(
+            Block::default()
+                .title(" Confirm discard ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(warning))
+                .style(Style::default().bg(colors.background())),
+        ),
+        area,
     );
 }
 
@@ -1971,7 +2336,7 @@ fn previous_file(document: Option<&DiffDocument>, scroll: usize) -> usize {
 fn target_name(target: &LaunchTarget) -> &'static str {
     match target {
         LaunchTarget::Dashboard => "dashboard",
-        LaunchTarget::WorkingTree { .. } => "unstaged diff",
+        LaunchTarget::WorkingTree { .. } => "working-tree diff",
         LaunchTarget::Staged { .. } => "staged diff",
         LaunchTarget::Commit { .. } => "commit diff",
         LaunchTarget::Compare { .. } => "revision comparison",
@@ -2008,6 +2373,27 @@ mod tests {
             ordered,
             ["assets/icon.svg", "src/app.rs", "src/lib.rs", "README.md"]
                 .map(std::path::PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn hides_redundant_raw_patch_headers() {
+        assert!(!is_visible_diff_line(LineKind::FileHeader));
+        assert!(!is_visible_diff_line(LineKind::HunkHeader));
+        assert!(!is_visible_diff_line(LineKind::Metadata));
+        assert!(!is_visible_diff_line(LineKind::NoNewline));
+        assert!(is_visible_diff_line(LineKind::Addition));
+        assert!(is_visible_diff_line(LineKind::Context));
+    }
+
+    #[test]
+    fn removes_patch_markers_from_rendered_code() {
+        assert_eq!(diff_content_offset(LineKind::Addition, "+new"), 1);
+        assert_eq!(diff_content_offset(LineKind::Deletion, "-old"), 1);
+        assert_eq!(diff_content_offset(LineKind::Context, " same"), 1);
+        assert_eq!(
+            diff_content_offset(LineKind::Binary, "Binary files differ"),
+            0
         );
     }
 
