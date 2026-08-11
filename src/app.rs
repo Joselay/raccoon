@@ -209,9 +209,9 @@ impl AppState {
             let unstaged_len = data.unstaged.len();
             let len = staged_len + unstaged_len;
             let current = match self.focus {
-                Focus::Unstaged => self.unstaged_selection.min(unstaged_len.saturating_sub(1)),
-                Focus::Staged => {
-                    unstaged_len + self.staged_selection.min(staged_len.saturating_sub(1))
+                Focus::Staged => self.staged_selection.min(staged_len.saturating_sub(1)),
+                Focus::Unstaged => {
+                    staged_len + self.unstaged_selection.min(unstaged_len.saturating_sub(1))
                 }
                 _ => 0,
             };
@@ -220,12 +220,12 @@ impl AppState {
             } else {
                 (current as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize
             };
-            if next < unstaged_len {
-                self.focus = Focus::Unstaged;
-                self.unstaged_selection = next;
-            } else {
+            if next < staged_len {
                 self.focus = Focus::Staged;
-                self.staged_selection = next.saturating_sub(unstaged_len);
+                self.staged_selection = next;
+            } else {
+                self.focus = Focus::Unstaged;
+                self.unstaged_selection = next.saturating_sub(staged_len);
             }
             return current != next;
         }
@@ -253,8 +253,24 @@ impl AppState {
                 _ => Focus::History,
             },
             DashboardPage::Changes => match self.focus {
-                Focus::Staged => Focus::Unstaged,
-                Focus::Unstaged => Focus::Staged,
+                Focus::Staged
+                    if self
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| !data.unstaged.is_empty()) =>
+                {
+                    Focus::Unstaged
+                }
+                Focus::Unstaged
+                    if self
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| !data.staged.is_empty()) =>
+                {
+                    Focus::Staged
+                }
+                Focus::Staged => Focus::Staged,
+                Focus::Unstaged => Focus::Unstaged,
                 _ => Focus::Staged,
             },
         };
@@ -767,7 +783,10 @@ where
         match &state.screen {
             Screen::Dashboard => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Tab | KeyCode::Right | KeyCode::BackTab | KeyCode::Left => {
+                KeyCode::Tab | KeyCode::BackTab => {
+                    state.cycle_focus();
+                }
+                KeyCode::Right | KeyCode::Left => {
                     if state.dashboard_page == DashboardPage::History {
                         state.cycle_focus();
                     }
@@ -1241,9 +1260,29 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState
         }
         DashboardPage::Changes => {
             let columns =
-                Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)])
+                Layout::horizontal([Constraint::Percentage(36), Constraint::Percentage(64)])
                     .split(area);
-            render_unified_changes(frame, columns[0], state, data, colors);
+            let sidebar =
+                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(columns[0]);
+            render_change_tree(
+                frame,
+                sidebar[0],
+                format!("STAGED · {}", data.staged.len()),
+                state.focus == Focus::Staged,
+                state.staged_selection,
+                &data.staged,
+                colors,
+            );
+            render_change_tree(
+                frame,
+                sidebar[1],
+                format!("UNSTAGED · {}", data.unstaged.len()),
+                state.focus == Focus::Unstaged,
+                state.unstaged_selection,
+                &data.unstaged,
+                colors,
+            );
             render_change_preview(frame, columns[1], state);
         }
     }
@@ -1343,104 +1382,6 @@ fn render_commit_files(
         state.commit_file_selection,
         &state.commit_files,
         colors,
-    );
-}
-
-fn render_unified_changes(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    state: &AppState,
-    data: &DashboardData,
-    colors: Colors<'_>,
-) {
-    let mut rows = Vec::new();
-    append_change_section(
-        &mut rows,
-        "CHANGES",
-        Focus::Unstaged,
-        &data.unstaged,
-        colors,
-    );
-    append_change_section(
-        &mut rows,
-        "STAGED CHANGES",
-        Focus::Staged,
-        &data.staged,
-        colors,
-    );
-    let selected_entry_index = match state.focus {
-        Focus::Staged => selected_tree_entry_index(&data.staged, state.staged_selection),
-        Focus::Unstaged => selected_tree_entry_index(&data.unstaged, state.unstaged_selection),
-        _ => None,
-    };
-    let selected_row = selected_entry_index
-        .and_then(|entry_index| {
-            rows.iter().position(|row| {
-                row.scope == Some(state.focus) && row.entry_index == Some(entry_index)
-            })
-        })
-        .unwrap_or(0);
-    let lines = rows.into_iter().map(|row| row.line).collect::<Vec<_>>();
-    render_rows(
-        frame,
-        area,
-        format!(
-            "Changed files · {}",
-            data.staged.len() + data.unstaged.len()
-        ),
-        true,
-        selected_row,
-        &lines,
-        colors,
-    );
-}
-
-struct ScopedChangeTreeRow {
-    line: Line<'static>,
-    scope: Option<Focus>,
-    entry_index: Option<usize>,
-}
-
-fn append_change_section(
-    rows: &mut Vec<ScopedChangeTreeRow>,
-    title: &str,
-    scope: Focus,
-    entries: &[ChangeEntry],
-    colors: Colors<'_>,
-) {
-    if !rows.is_empty() {
-        rows.push(ScopedChangeTreeRow {
-            line: Line::raw(""),
-            scope: None,
-            entry_index: None,
-        });
-    }
-    rows.push(ScopedChangeTreeRow {
-        line: Line::styled(
-            format!("{title} · {}", entries.len()),
-            Style::default()
-                .fg(colors.muted())
-                .add_modifier(Modifier::BOLD),
-        ),
-        scope: None,
-        entry_index: None,
-    });
-    if entries.is_empty() {
-        rows.push(ScopedChangeTreeRow {
-            line: Line::styled("  (none)", Style::default().fg(colors.muted())),
-            scope: None,
-            entry_index: None,
-        });
-        return;
-    }
-    rows.extend(
-        change_tree_rows(entries, colors)
-            .into_iter()
-            .map(|row| ScopedChangeTreeRow {
-                line: row.line,
-                scope: row.entry_index.map(|_| scope),
-                entry_index: row.entry_index,
-            }),
     );
 }
 
@@ -1548,7 +1489,11 @@ fn append_change_tree_rows(
             line: directory_tree_row(prefix, last, name, colors),
             entry_index: None,
         });
-        let child_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
+        let child_prefix = if prefix.is_empty() {
+            "   ".to_owned()
+        } else {
+            format!("{prefix}{}", if last { "   " } else { "│  " })
+        };
         append_change_tree_rows(child, &child_prefix, entries, colors, rows);
     }
     for (name, entry_index) in &node.files {
@@ -1567,11 +1512,13 @@ fn directory_tree_row(
     name: &std::ffi::OsStr,
     colors: Colors<'_>,
 ) -> Line<'static> {
+    let branch = if prefix.is_empty() {
+        "  ".to_owned()
+    } else {
+        format!("{prefix}{} ", if last { "└─" } else { "├─" })
+    };
     Line::from(vec![
-        Span::styled(
-            format!("{prefix}{} ", if last { "└─" } else { "├─" }),
-            Style::default().fg(colors.border()),
-        ),
+        Span::styled(branch, Style::default().fg(colors.border())),
         Span::styled(
             "",
             Style::default().fg(colors.color(colors.theme.syntax.constant)),
@@ -1603,11 +1550,13 @@ fn file_tree_row(
         ChangeKind::Unknown => colors.muted(),
     };
     let icon = file_icon::for_path(&change.path);
+    let branch = if prefix.is_empty() {
+        "  ".to_owned()
+    } else {
+        format!("{prefix}{} ", if last { "└─" } else { "├─" })
+    };
     Line::from(vec![
-        Span::styled(
-            format!("{prefix}{} ", if last { "└─" } else { "├─" }),
-            Style::default().fg(colors.border()),
-        ),
+        Span::styled(branch, Style::default().fg(colors.border())),
         Span::styled(
             change_marker(change.kind),
             Style::default()
@@ -1654,24 +1603,29 @@ fn render_rows<T: Into<String>>(
                 let selected = focused && index == selection;
                 let mut spans = Vec::with_capacity(row.spans.len() + 1);
                 spans.push(Span::styled(
-                    if selected { "› " } else { "  " },
+                    if selected { "▎ " } else { "  " },
                     if selected {
                         Style::default()
-                            .fg(colors.accent())
-                            .bg(colors.panel())
+                            .fg(colors.selection_foreground())
+                            .bg(colors.color(colors.theme.ui.selection))
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(colors.muted()).bg(colors.panel())
                     },
                 ));
                 spans.extend(row.spans.iter().cloned().map(|mut span| {
-                    let primary_text = selected && span.style.fg == Some(colors.foreground());
-                    let mut selection_style = Style::default().bg(colors.panel());
-                    if primary_text {
-                        selection_style = selection_style
-                            .fg(colors.accent())
-                            .add_modifier(Modifier::BOLD);
-                    }
+                    let selection_style = if selected {
+                        let mut style =
+                            Style::default().bg(colors.color(colors.theme.ui.selection));
+                        if span.style.fg == Some(colors.foreground()) {
+                            style = style
+                                .fg(colors.selection_foreground())
+                                .add_modifier(Modifier::BOLD);
+                        }
+                        style
+                    } else {
+                        Style::default().bg(colors.panel())
+                    };
                     span.style = span.style.patch(selection_style);
                     span
                 }));
