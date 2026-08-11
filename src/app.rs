@@ -1034,18 +1034,15 @@ fn next_changes_focus(
     has_unstaged: bool,
 ) -> (Focus, Focus) {
     match focus {
+        Focus::Staged if has_unstaged => (Focus::Unstaged, Focus::Unstaged),
         Focus::Staged => (Focus::Diff, Focus::Staged),
         Focus::Unstaged => (Focus::Diff, Focus::Unstaged),
-        Focus::Diff if preview_focus == Focus::Staged && has_staged => {
-            (Focus::Staged, Focus::Staged)
-        }
-        Focus::Diff if preview_focus == Focus::Unstaged && has_unstaged => {
-            (Focus::Unstaged, Focus::Unstaged)
-        }
         Focus::Diff if has_staged => (Focus::Staged, Focus::Staged),
-        Focus::Diff => (Focus::Unstaged, Focus::Unstaged),
+        Focus::Diff if has_unstaged => (Focus::Unstaged, Focus::Unstaged),
+        Focus::Diff => (Focus::Diff, preview_focus),
         _ if has_staged => (Focus::Staged, Focus::Staged),
-        _ => (Focus::Unstaged, Focus::Unstaged),
+        _ if has_unstaged => (Focus::Unstaged, Focus::Unstaged),
+        _ => (Focus::Diff, preview_focus),
     }
 }
 
@@ -2370,20 +2367,27 @@ mod tests {
     }
 
     #[test]
-    fn tab_toggles_staged_files_and_their_diff() {
+    fn tab_cycles_staged_unstaged_and_diff() {
         let (focus, source) = next_changes_focus(Focus::Staged, Focus::Staged, true, true);
-        assert_eq!((focus, source), (Focus::Diff, Focus::Staged));
+        assert_eq!((focus, source), (Focus::Unstaged, Focus::Unstaged));
+
+        let (focus, source) = next_changes_focus(focus, source, true, true);
+        assert_eq!((focus, source), (Focus::Diff, Focus::Unstaged));
 
         let (focus, source) = next_changes_focus(focus, source, true, true);
         assert_eq!((focus, source), (Focus::Staged, Focus::Staged));
     }
 
     #[test]
-    fn tab_toggles_unstaged_files_and_their_diff() {
-        let (focus, source) = next_changes_focus(Focus::Unstaged, Focus::Unstaged, true, true);
-        assert_eq!((focus, source), (Focus::Diff, Focus::Unstaged));
+    fn tab_skips_empty_change_lists() {
+        let (focus, source) = next_changes_focus(Focus::Staged, Focus::Staged, true, false);
+        assert_eq!((focus, source), (Focus::Diff, Focus::Staged));
+        let (focus, source) = next_changes_focus(focus, source, true, false);
+        assert_eq!((focus, source), (Focus::Staged, Focus::Staged));
 
-        let (focus, source) = next_changes_focus(focus, source, true, true);
+        let (focus, source) = next_changes_focus(Focus::Unstaged, Focus::Unstaged, false, true);
+        assert_eq!((focus, source), (Focus::Diff, Focus::Unstaged));
+        let (focus, source) = next_changes_focus(focus, source, false, true);
         assert_eq!((focus, source), (Focus::Unstaged, Focus::Unstaged));
     }
 
