@@ -816,7 +816,18 @@ where
             Screen::Dashboard => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Tab | KeyCode::BackTab => {
+                    let previous_target = state.selected_target();
                     state.cycle_focus();
+                    if state.dashboard_page == DashboardPage::Changes
+                        && state.selected_target() != previous_target
+                    {
+                        request_change_preview(
+                            &mut state,
+                            &git_worker,
+                            &mut next_request_id,
+                            &mut diff_request,
+                        )?;
+                    }
                 }
                 KeyCode::Right | KeyCode::Left => {
                     if state.dashboard_page == DashboardPage::History {
@@ -1034,11 +1045,11 @@ fn next_changes_focus(
     has_unstaged: bool,
 ) -> (Focus, Focus) {
     match focus {
-        Focus::Staged if has_unstaged => (Focus::Unstaged, Focus::Unstaged),
         Focus::Staged => (Focus::Diff, Focus::Staged),
+        Focus::Unstaged if has_staged => (Focus::Staged, Focus::Staged),
         Focus::Unstaged => (Focus::Diff, Focus::Unstaged),
-        Focus::Diff if has_staged => (Focus::Staged, Focus::Staged),
         Focus::Diff if has_unstaged => (Focus::Unstaged, Focus::Unstaged),
+        Focus::Diff if has_staged => (Focus::Staged, Focus::Staged),
         Focus::Diff => (Focus::Diff, preview_focus),
         _ if has_staged => (Focus::Staged, Focus::Staged),
         _ if has_unstaged => (Focus::Unstaged, Focus::Unstaged),
@@ -1347,19 +1358,6 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState
             render_change_tree(
                 frame,
                 sidebar[0],
-                format!("STAGED · {}", data.staged.len()),
-                RowFocus {
-                    focused: state.focus == Focus::Staged,
-                    selection_visible: state.focus == Focus::Staged
-                        || (state.focus == Focus::Diff && state.preview_focus == Focus::Staged),
-                },
-                state.staged_selection,
-                &data.staged,
-                colors,
-            );
-            render_change_tree(
-                frame,
-                sidebar[1],
                 format!("UNSTAGED · {}", data.unstaged.len()),
                 RowFocus {
                     focused: state.focus == Focus::Unstaged,
@@ -1368,6 +1366,19 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState
                 },
                 state.unstaged_selection,
                 &data.unstaged,
+                colors,
+            );
+            render_change_tree(
+                frame,
+                sidebar[1],
+                format!("STAGED · {}", data.staged.len()),
+                RowFocus {
+                    focused: state.focus == Focus::Staged,
+                    selection_visible: state.focus == Focus::Staged
+                        || (state.focus == Focus::Diff && state.preview_focus == Focus::Staged),
+                },
+                state.staged_selection,
+                &data.staged,
                 colors,
             );
             render_change_preview(frame, columns[1], state);
@@ -2367,15 +2378,15 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_staged_unstaged_and_diff() {
-        let (focus, source) = next_changes_focus(Focus::Staged, Focus::Staged, true, true);
-        assert_eq!((focus, source), (Focus::Unstaged, Focus::Unstaged));
-
-        let (focus, source) = next_changes_focus(focus, source, true, true);
-        assert_eq!((focus, source), (Focus::Diff, Focus::Unstaged));
-
-        let (focus, source) = next_changes_focus(focus, source, true, true);
+    fn tab_cycles_unstaged_staged_and_diff() {
+        let (focus, source) = next_changes_focus(Focus::Unstaged, Focus::Unstaged, true, true);
         assert_eq!((focus, source), (Focus::Staged, Focus::Staged));
+
+        let (focus, source) = next_changes_focus(focus, source, true, true);
+        assert_eq!((focus, source), (Focus::Diff, Focus::Staged));
+
+        let (focus, source) = next_changes_focus(focus, source, true, true);
+        assert_eq!((focus, source), (Focus::Unstaged, Focus::Unstaged));
     }
 
     #[test]

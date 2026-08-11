@@ -53,7 +53,7 @@ Paths are interpreted relative to the invocation directory, or relative to the s
 
 ### Uncommitted changes
 
-- Indexed files appear in the upper `STAGED` panel; working-tree files appear in the lower `UNSTAGED` panel
+- Working-tree files appear in the upper `UNSTAGED` panel; indexed files appear in the lower `STAGED` panel
 - Both panels use expanded directory trees and share one continuous selection
 - `Tab`: cycle focus through staged files, unstaged files, and the diff preview
 - `j`, `k`, arrows, Page Up/Down: move file selection, or scroll when the diff preview is focused
