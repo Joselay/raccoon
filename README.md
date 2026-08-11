@@ -44,6 +44,7 @@ Paths are interpreted relative to the invocation directory, or relative to the s
 - `Tab`, `←`, `→`: change panel
 - `j`, `k`, arrows, Page Up/Down: move selection
 - `Enter`: inspect the selected commit or file changed by that commit
+- `y`: copy the selected commit's full SHA
 - `u`: open uncommitted changes
 - `b`: open the branch picker
 - `c`: open the branch picker with the current branch selected as the comparison base

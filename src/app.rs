@@ -17,6 +17,7 @@ use ratatui::{
 
 use crate::{
     cli::LaunchTarget,
+    clipboard,
     config::{AppConfig, ConfigPaths, ThemeConfig},
     dashboard::{ChangeEntry, ChangeKind, DashboardData},
     diff::{DiffDocument, LineKind},
@@ -946,6 +947,19 @@ where
                         .and_then(|data| data.branches.get(state.branch_selection))
                         .map(|branch| branch.name.clone());
                 }
+                KeyCode::Char('y') if state.dashboard_page == DashboardPage::History => {
+                    if let Some(commit) = state
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.commits.get(state.history_selection))
+                    {
+                        let full_id = commit.id.to_string_lossy();
+                        state.theme_message = Some(match clipboard::copy(&full_id) {
+                            Ok(()) => format!("Copied commit SHA: {}", commit.short_id),
+                            Err(error) => format!("Could not copy commit SHA: {error}"),
+                        });
+                    }
+                }
                 KeyCode::Char('h') => {
                     state.dashboard_page = DashboardPage::History;
                     state.focus = Focus::History;
@@ -1284,7 +1298,7 @@ fn render(frame: &mut ratatui::Frame<'_>, state: &AppState) {
     }
     let help = match (&state.screen, state.dashboard_page) {
         (Screen::Dashboard, DashboardPage::History) => {
-            " q quit  u changes  Tab panels  j/k move  Enter open  b branches  c compare  live updates"
+            " q quit  u changes  Tab panels  j/k move  Enter open  y copy SHA  b branches  c compare"
         }
         (Screen::Dashboard, DashboardPage::Changes) => {
             " q quit  h history  Tab focus  j/k select or scroll  Enter diff  D discard changes  b branches"

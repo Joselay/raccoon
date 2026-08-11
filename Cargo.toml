@@ -10,6 +10,7 @@ fancy = ["syntect/regex-fancy", "two-face/syntect-fancy"]
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = "0.22.1"
 clap = { version = "4.6.6", features = ["derive"] }
 crossbeam-channel = "0.5.16"
 crossterm = "0.29.0"
