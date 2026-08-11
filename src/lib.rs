@@ -12,4 +12,5 @@ pub mod highlight;
 pub mod repository;
 pub mod terminal;
 pub mod theme;
+pub mod watcher;
 pub mod worker;

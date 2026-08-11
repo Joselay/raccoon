@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, ffi::OsString, time::Duration};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -20,6 +24,7 @@ use crate::{
     highlight::{HighlightedDiff, SyntaxToken},
     repository::Repository,
     theme::{LoadedTheme, Rgb, Theme},
+    watcher::RepositoryWatcher,
     worker::{GitCommand, GitPayload, GitWorker, HighlightCommand, HighlightWorker},
 };
 
@@ -373,6 +378,8 @@ where
     };
     let git_worker = GitWorker::start(repo.clone());
     let highlight_worker = HighlightWorker::start();
+    let repository_watcher = RepositoryWatcher::start(&repo)?;
+    let mut refresh_due = None;
     let mut next_request_id = 1u64;
     let mut dashboard_request = None;
     let mut diff_request = None;
@@ -407,6 +414,7 @@ where
                 dashboard_request = None;
                 match response.result {
                     Ok(GitPayload::Dashboard(data)) => {
+                        reconcile_change_selection(&mut state, &data);
                         if state.dashboard_page == DashboardPage::Changes {
                             if state.focus == Focus::Unstaged
                                 && data.unstaged.is_empty()
@@ -436,7 +444,9 @@ where
                             .unwrap_or(0);
                         state.head = Some(data.head.clone());
                         state.data = Some(data);
-                        if state.dashboard_page == DashboardPage::History {
+                        if matches!(state.screen, Screen::Dashboard)
+                            && state.dashboard_page == DashboardPage::History
+                        {
                             select_commit_preview(
                                 &mut state,
                                 &git_worker,
@@ -444,7 +454,7 @@ where
                                 &mut commit_files_request,
                                 history_path.as_ref(),
                             )?;
-                        } else {
+                        } else if matches!(state.screen, Screen::Dashboard) {
                             request_change_preview(
                                 &mut state,
                                 &git_worker,
@@ -471,6 +481,8 @@ where
                             document: diff.clone(),
                         })?;
                         highlight_request = Some(response.request_id);
+                        state.highlighted = None;
+                        state.search_matches.clear();
                         state.diff = Some(diff);
                     }
                     Ok(
@@ -573,6 +585,28 @@ where
             dirty = true;
         }
 
+        while repository_watcher.events.try_recv().is_ok() {
+            refresh_due = Some(Instant::now() + Duration::from_millis(120));
+        }
+        if refresh_due.is_some_and(|due| Instant::now() >= due)
+            && dashboard_request.is_none()
+            && diff_request.is_none()
+            && head_request.is_none()
+            && commit_files_request.is_none()
+            && discard_request.is_none()
+        {
+            refresh_due = None;
+            request_realtime_refresh(
+                &mut state,
+                &git_worker,
+                &mut next_request_id,
+                &mut dashboard_request,
+                &mut diff_request,
+                &mut head_request,
+                history_path.as_ref(),
+            )?;
+        }
+
         if dirty {
             terminal.draw(|frame| render(frame, &repo, &state))?;
             dirty = false;
@@ -584,10 +618,10 @@ where
             || commit_files_request.is_some()
             || discard_request.is_some()
             || highlight_request.is_some();
-        if !event::poll(if loading {
+        if !event::poll(if loading || refresh_due.is_some() {
             Duration::from_millis(25)
         } else {
-            Duration::from_secs(60)
+            Duration::from_millis(100)
         })? {
             continue;
         }
@@ -920,16 +954,6 @@ where
                         &mut diff_request,
                     )?;
                 }
-                KeyCode::Char('r') => {
-                    state.dashboard_error = None;
-                    let request_id = next_request_id;
-                    next_request_id += 1;
-                    git_worker.request(GitCommand::Dashboard {
-                        request_id,
-                        history_path: history_path.clone(),
-                    })?;
-                    dashboard_request = Some(request_id);
-                }
                 KeyCode::Char('D') if state.dashboard_page == DashboardPage::Changes => {
                     let has_worktree_changes = state.data.as_ref().is_some_and(|data| {
                         data.unstaged
@@ -1016,6 +1040,58 @@ fn request_diff(
     worker.request(GitCommand::Diff { request_id, target })?;
     *current_request = Some(request_id);
     Ok(())
+}
+
+fn request_realtime_refresh(
+    state: &mut AppState,
+    worker: &GitWorker,
+    next_request_id: &mut u64,
+    dashboard_request: &mut Option<u64>,
+    diff_request: &mut Option<u64>,
+    head_request: &mut Option<u64>,
+    history_path: Option<&std::path::PathBuf>,
+) -> Result<()> {
+    state.dashboard_error = None;
+    state.diff_error = None;
+
+    if state.data.is_some() || matches!(state.screen, Screen::Dashboard) {
+        let request_id = *next_request_id;
+        *next_request_id += 1;
+        worker.request(GitCommand::Dashboard {
+            request_id,
+            history_path: history_path.cloned(),
+        })?;
+        *dashboard_request = Some(request_id);
+    }
+
+    if let Screen::Diff { target, .. } = &state.screen {
+        request_diff(worker, next_request_id, diff_request, target.clone())?;
+    }
+
+    if state.data.is_none() {
+        let request_id = *next_request_id;
+        *next_request_id += 1;
+        worker.request(GitCommand::Head { request_id })?;
+        *head_request = Some(request_id);
+    }
+    Ok(())
+}
+
+fn reconcile_change_selection(state: &mut AppState, data: &DashboardData) {
+    let selected = state.selected_target();
+    match selected {
+        Some(LaunchTarget::Staged { path }) => {
+            if let Some(index) = data.staged.iter().position(|entry| entry.path == path) {
+                state.staged_selection = index;
+            }
+        }
+        Some(LaunchTarget::WorkingTree { path }) => {
+            if let Some(index) = data.unstaged.iter().position(|entry| entry.path == path) {
+                state.unstaged_selection = index;
+            }
+        }
+        _ => {}
+    }
 }
 
 fn request_change_preview(
@@ -1185,10 +1261,10 @@ fn render(frame: &mut ratatui::Frame<'_>, repo: &Repository, state: &AppState) {
     }
     let help = match (&state.screen, state.dashboard_page) {
         (Screen::Dashboard, DashboardPage::History) => {
-            " q quit  u changes  Tab panels  j/k move  Enter open  b branches  c compare  r refresh"
+            " q quit  u changes  Tab panels  j/k move  Enter open  b branches  c compare  live updates"
         }
         (Screen::Dashboard, DashboardPage::Changes) => {
-            " q quit  h history  j/k select  Enter diff  D discard changes  b branches  r refresh"
+            " q quit  h history  j/k select  Enter diff  D discard changes  b branches  live updates"
         }
         (Screen::Diff { direct: true, .. }, _) => {
             " q quit  j/k scroll  n/N hunks  [/] files  / search  s/S matches  t themes"

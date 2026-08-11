@@ -47,7 +47,7 @@ Paths are interpreted relative to the invocation directory, or relative to the s
 - `u`: open uncommitted changes
 - `b`: open the branch picker
 - `c`: open the branch picker with the current branch selected as the comparison base
-- `r`: refresh repository data
+- Repository data and previews update automatically as files, the index, HEAD, or refs change
 - `t`: preview themes
 - `q`: quit
 
@@ -62,7 +62,7 @@ Paths are interpreted relative to the invocation directory, or relative to the s
 - `D`: confirm discarding all tracked working-tree changes; staged changes and untracked files are kept
 - `h`: return to history
 - `b`: open the branch picker
-- `r`: refresh repository data
+- Changed files and the selected diff preview update automatically
 - `q`: quit
 
 ### Branch picker
@@ -84,6 +84,7 @@ Paths are interpreted relative to the invocation directory, or relative to the s
 - `q`: quit
 
 Git operations and syntax highlighting run in bounded background workers. Semantic diff coloring appears before syntax highlighting completes.
+The repository worktree and Git metadata are watched continuously, so dashboards and diffs update without a refresh action.
 Raw patch syntax such as `diff --git`, `index`, `---`, `+++`, `@@` coordinates, and leading patch markers is hidden in the UI. Color and line-number placement distinguish additions from deletions, keeping the viewport focused on code and its surrounding context.
 
 ## Themes

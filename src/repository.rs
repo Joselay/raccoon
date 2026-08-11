@@ -68,6 +68,26 @@ impl Repository {
         })
     }
 
+    pub fn git_dir(&self) -> Result<PathBuf> {
+        let output = self.git(["rev-parse", "--absolute-git-dir"])?;
+        if !output.status.success() {
+            bail!(
+                "resolve Git directory: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let path = PathBuf::from(bytes_to_os_string(
+            output
+                .stdout
+                .strip_suffix(b"\n")
+                .unwrap_or(&output.stdout)
+                .strip_suffix(b"\r")
+                .unwrap_or(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout)),
+        ));
+        path.canonicalize()
+            .with_context(|| format!("resolve Git directory {}", path.display()))
+    }
+
     fn resolve_path(&self, path: &Path, invocation_dir: &Path) -> Result<PathBuf> {
         let absolute = if path.is_absolute() {
             normalize(path)
@@ -151,4 +171,15 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     result
+}
+
+#[cfg(unix)]
+fn bytes_to_os_string(bytes: &[u8]) -> OsString {
+    use std::os::unix::ffi::OsStringExt;
+    OsString::from_vec(bytes.to_vec())
+}
+
+#[cfg(not(unix))]
+fn bytes_to_os_string(bytes: &[u8]) -> OsString {
+    OsString::from(String::from_utf8_lossy(bytes).into_owned())
 }
