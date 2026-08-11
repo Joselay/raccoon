@@ -58,6 +58,15 @@ impl Colors<'_> {
     fn selected(self) -> Color {
         self.color(self.theme.ui.selection)
     }
+    fn selection_foreground(self) -> Color {
+        self.color(self.theme.ui.selection_foreground)
+    }
+    fn panel(self) -> Color {
+        self.color(self.theme.ui.panel)
+    }
+    fn focused_border(self) -> Color {
+        self.color(self.theme.ui.focused_border)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -629,7 +638,7 @@ fn render(frame: &mut ratatui::Frame<'_>, repo: &Repository, state: &AppState) {
             ),
             Span::styled(
                 format!("{} — {title}", repo.root.display()),
-                Style::default().fg(Color::Rgb(166, 173, 200)),
+                Style::default().fg(colors.muted()),
             ),
         ]))
         .style(background),
@@ -837,13 +846,11 @@ fn render_rows<T: Into<String>>(
                     format!("{} {row}", if selected { "›" } else { " " }),
                     if selected {
                         Style::default()
-                            .fg(colors.foreground())
+                            .fg(colors.selection_foreground())
                             .bg(colors.selected())
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default()
-                            .fg(colors.foreground())
-                            .bg(colors.background())
+                        Style::default().fg(colors.foreground()).bg(colors.panel())
                     },
                 )
             })
@@ -853,11 +860,11 @@ fn render_rows<T: Into<String>>(
         .title(format!(" {} ", title.into()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if focused {
-            colors.accent()
+            colors.focused_border()
         } else {
             colors.border()
         }))
-        .style(Style::default().bg(colors.color(colors.theme.ui.panel)));
+        .style(Style::default().bg(colors.panel()));
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -894,48 +901,75 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
             .skip(scroll)
             .take(available)
             .map(|(line_index, line)| {
-                let gutter = match (line.old_line, line.new_line) {
-                    (Some(old), Some(new)) => format!("{old:>5} {new:>5} │ "),
-                    (Some(old), None) => format!("{old:>5}       │ "),
-                    (None, Some(new)) => format!("      {new:>5} │ "),
-                    _ => "            │ ".to_owned(),
+                let line_numbers = match (line.old_line, line.new_line) {
+                    (Some(old), Some(new)) => format!("{old:>5} {new:>5}"),
+                    (Some(old), None) => format!("{old:>5}      "),
+                    (None, Some(new)) => format!("      {new:>5}"),
+                    _ => "           ".to_owned(),
                 };
                 let mut style = line_style(line.kind, colors);
-                if state.search_matches.binary_search(&line_index).is_ok() {
-                    style = style.bg(colors.color(colors.theme.ui.search_match));
+                let is_search_match = state.search_matches.binary_search(&line_index).is_ok();
+                let is_active_match =
+                    state.search_matches.get(state.search_match_index) == Some(&line_index);
+                if is_active_match {
+                    style = style
+                        .fg(colors.selection_foreground())
+                        .bg(colors.color(colors.theme.diff.selected_background));
+                } else if is_search_match {
+                    style = style
+                        .fg(colors.color(colors.theme.ui.search_match_foreground))
+                        .bg(colors.color(colors.theme.ui.search_match));
                 }
-                if state.search_matches.get(state.search_match_index) == Some(&line_index) {
-                    style = style.bg(colors.color(colors.theme.diff.selected_background));
-                }
-                let mut spans = vec![Span::styled(
-                    gutter,
-                    Style::default()
-                        .fg(gutter_color(line.kind, colors))
-                        .bg(style.bg.unwrap_or(colors.background())),
-                )];
+                let gutter_background = style.bg.unwrap_or(colors.background());
+                let highlighted_foreground = is_search_match.then_some(
+                    style
+                        .fg
+                        .expect("search match styles always define a foreground"),
+                );
+                let mut spans = vec![
+                    Span::styled(
+                        line_numbers,
+                        Style::default()
+                            .fg(highlighted_foreground
+                                .unwrap_or_else(|| colors.color(colors.theme.diff.line_number)))
+                            .bg(gutter_background),
+                    ),
+                    Span::styled(
+                        " │ ",
+                        Style::default()
+                            .fg(highlighted_foreground
+                                .unwrap_or_else(|| colors.color(colors.theme.diff.gutter)))
+                            .bg(gutter_background),
+                    ),
+                ];
                 let text = document.line_text(line);
-                if let Some(highlighted) = state
-                    .highlighted
-                    .as_ref()
-                    .and_then(|highlighted| highlighted.lines.get(line_index))
-                {
-                    let mut offset = 0;
-                    for highlighted_span in highlighted {
-                        if highlighted_span.range.start > offset {
+                if !is_search_match {
+                    if let Some(highlighted) = state
+                        .highlighted
+                        .as_ref()
+                        .and_then(|highlighted| highlighted.lines.get(line_index))
+                    {
+                        let mut offset = 0;
+                        for highlighted_span in highlighted {
+                            if highlighted_span.range.start > offset {
+                                spans.push(Span::styled(
+                                    &text[offset..highlighted_span.range.start],
+                                    style,
+                                ));
+                            }
+                            let syntax_style =
+                                style.fg(syntax_color(highlighted_span.token, colors));
                             spans.push(Span::styled(
-                                &text[offset..highlighted_span.range.start],
-                                style,
+                                &text[highlighted_span.range.clone()],
+                                syntax_style,
                             ));
+                            offset = highlighted_span.range.end;
                         }
-                        let syntax_style = style.fg(syntax_color(highlighted_span.token, colors));
-                        spans.push(Span::styled(
-                            &text[highlighted_span.range.clone()],
-                            syntax_style,
-                        ));
-                        offset = highlighted_span.range.end;
-                    }
-                    if offset < text.len() {
-                        spans.push(Span::styled(&text[offset..], style));
+                        if offset < text.len() {
+                            spans.push(Span::styled(&text[offset..], style));
+                        }
+                    } else {
+                        spans.push(Span::styled(text, style));
                     }
                 } else {
                     spans.push(Span::styled(text, style));
@@ -986,11 +1020,11 @@ fn panel<'a>(
             .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(if focused {
-                colors.accent()
+                colors.focused_border()
             } else {
                 colors.border()
             }))
-            .style(Style::default().bg(colors.background())),
+            .style(Style::default().bg(colors.panel())),
     )
 }
 
@@ -1063,15 +1097,6 @@ fn line_style(kind: LineKind, colors: Colors<'_>) -> Style {
     }
 }
 
-fn gutter_color(kind: LineKind, colors: Colors<'_>) -> Color {
-    match kind {
-        LineKind::Addition => colors.color(colors.theme.diff.addition),
-        LineKind::Deletion => colors.color(colors.theme.diff.deletion),
-        LineKind::HunkHeader => colors.color(colors.theme.diff.hunk_header),
-        _ => colors.color(colors.theme.diff.gutter),
-    }
-}
-
 fn syntax_color(token: SyntaxToken, colors: Colors<'_>) -> Color {
     let syntax = &colors.theme.syntax;
     colors.color(match token {
@@ -1114,10 +1139,17 @@ fn render_theme_picker(frame: &mut ratatui::Frame<'_>, state: &AppState) {
         horizontal: 2,
         vertical: 1,
     });
+    let visible = inner.height.saturating_sub(2) as usize;
+    let start = state
+        .theme_index
+        .saturating_sub(visible.saturating_sub(1))
+        .min(state.themes.len().saturating_sub(visible));
     let rows = state
         .themes
         .iter()
         .enumerate()
+        .skip(start)
+        .take(visible)
         .map(|(index, theme)| {
             let confirmed = index == state.confirmed_theme_index;
             Line::styled(
@@ -1133,7 +1165,7 @@ fn render_theme_picker(frame: &mut ratatui::Frame<'_>, state: &AppState) {
                 ),
                 if index == state.theme_index {
                     Style::default()
-                        .fg(colors.color(colors.theme.ui.selection_foreground))
+                        .fg(colors.selection_foreground())
                         .bg(colors.selected())
                         .add_modifier(Modifier::BOLD)
                 } else {

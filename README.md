@@ -63,6 +63,14 @@ Custom themes are loaded from the platform configuration directory's `themes/` f
 
 See [`assets/themes/night-owl.toml`](assets/themes/night-owl.toml) for the schema.
 
+To add a theme:
+
+1. Copy `night-owl.toml` and change its palette and unique `name`.
+2. For a personal theme, place the file in the `themes/` directory beside Raccoon's generated `config.toml`.
+3. For a theme bundled with Raccoon, add the TOML file to `assets/themes/`. The build discovers every TOML file there automatically, so no Rust registry change is needed.
+
+The semantic mappings keep rendering independent of a specific palette. For example, a future Dracula theme only needs `assets/themes/dracula.toml`; UI and diff code require no changes.
+
 ## Safety and scope
 
 Raccoon is read-only. Branch selection never checks out or modifies a branch. Stashes, tags, reflog, worktrees, light themes, and general Git feature parity are intentionally out of scope.

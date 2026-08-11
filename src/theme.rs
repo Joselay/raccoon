@@ -88,9 +88,6 @@ pub enum Appearance {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     pub name: String,
-    pub author: Option<String>,
-    pub source: Option<String>,
-    pub license: Option<String>,
     pub appearance: Appearance,
     pub ui: UiColors,
     pub diff: DiffColors,
@@ -112,6 +109,7 @@ pub struct UiColors {
     pub error: Rgb,
     pub info: Rgb,
     pub search_match: Rgb,
+    pub search_match_foreground: Rgb,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,9 +150,6 @@ pub struct SyntaxColors {
 struct ThemeFile {
     name: String,
     appearance: String,
-    author: Option<String>,
-    source: Option<String>,
-    license: Option<String>,
     palette: BTreeMap<String, String>,
     ui: UiRefs,
     diff: DiffRefs,
@@ -182,7 +177,8 @@ refs_struct!(UiRefs {
     warning,
     error,
     info,
-    search_match
+    search_match,
+    search_match_foreground
 });
 refs_struct!(DiffRefs {
     header,
@@ -261,6 +257,7 @@ impl Theme {
             error: color!("ui", file.ui, error),
             info: color!("ui", file.ui, info),
             search_match: color!("ui", file.ui, search_match),
+            search_match_foreground: color!("ui", file.ui, search_match_foreground),
         };
         let diff = DiffColors {
             header: color!("diff", file.diff, header),
@@ -293,9 +290,6 @@ impl Theme {
         };
         let theme = Self {
             name: file.name,
-            author: file.author,
-            source: file.source,
-            license: file.license,
             appearance: Appearance::Dark,
             ui,
             diff,
@@ -317,6 +311,18 @@ impl Theme {
             self.ui.selection_foreground,
             "ui.selection",
             self.ui.selection,
+        )?;
+        self.require_contrast(
+            "ui.search_match_foreground",
+            self.ui.search_match_foreground,
+            "ui.search_match",
+            self.ui.search_match,
+        )?;
+        self.require_contrast(
+            "ui.selection_foreground",
+            self.ui.selection_foreground,
+            "diff.selected_background",
+            self.diff.selected_background,
         )?;
         self.require_contrast(
             "diff.context",
@@ -406,10 +412,18 @@ pub struct ThemeCatalog {
 
 impl ThemeCatalog {
     pub fn bundled() -> Self {
-        let themes = bundled_themes()
-            .into_iter()
-            .map(|theme| (theme.name.clone(), theme))
-            .collect();
+        let mut themes = BTreeMap::new();
+        for theme in bundled_themes() {
+            let name = theme.name.clone();
+            assert!(
+                themes.insert(name.clone(), theme).is_none(),
+                "bundled theme name `{name}` is duplicated"
+            );
+        }
+        assert!(
+            themes.contains_key(DEFAULT_THEME_NAME),
+            "bundled default theme `{DEFAULT_THEME_NAME}` is missing"
+        );
         Self {
             themes,
             diagnostics: Vec::new(),
@@ -554,10 +568,13 @@ impl LoadedTheme {
 }
 
 pub fn bundled_themes() -> Vec<Theme> {
-    const SOURCES: &[&str] = &[include_str!("../assets/themes/night-owl.toml")];
+    const SOURCES: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/bundled_themes.rs"));
     SOURCES
         .iter()
-        .map(|source| Theme::from_toml(source).expect("bundled theme must be valid"))
+        .map(|(file, source)| {
+            Theme::from_toml(source)
+                .unwrap_or_else(|error| panic!("bundled theme `{file}` must be valid: {error}"))
+        })
         .collect()
 }
 
@@ -591,6 +608,7 @@ warning="yellow"
 error="red"
 info="blue"
 search_match="yellow"
+search_match_foreground="bg"
 [diff]
 header="blue"
 hunk_header="blue"
@@ -658,13 +676,12 @@ invalid="red"
     #[test]
     fn bundled_night_owl_is_valid_dark_and_default() {
         let themes = bundled_themes();
-        assert_eq!(themes.len(), 1);
         assert!(
             themes
                 .iter()
                 .all(|theme| theme.appearance == Appearance::Dark)
         );
-        assert_eq!(themes[0].name, DEFAULT_THEME_NAME);
+        assert!(themes.iter().any(|theme| theme.name == DEFAULT_THEME_NAME));
     }
 
     #[test]

@@ -1,7 +1,5 @@
 name="Night Owl"
 appearance="dark"
-author="Sarah Drasner"
-source="https://github.com/sdras/night-owl-vscode-theme"
 [palette]
 background="#011627"
 panel="#001122"
@@ -32,6 +30,7 @@ warning="yellow"
 error="red"
 info="cyan"
 search_match="orange"
+search_match_foreground="background"
 [diff]
 header="purple"
 hunk_header="blue"
