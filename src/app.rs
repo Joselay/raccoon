@@ -18,7 +18,7 @@ use ratatui::{
 use crate::{
     cli::LaunchTarget,
     config::{AppConfig, ConfigPaths, ThemeConfig},
-    dashboard::{ChangeEntry, ChangeKind, DashboardData, HeadInfo},
+    dashboard::{ChangeEntry, ChangeKind, DashboardData},
     diff::{DiffDocument, LineKind},
     file_icon::{self, IconColor},
     highlight::{HighlightedDiff, SyntaxToken},
@@ -96,7 +96,6 @@ struct AppState {
     dashboard_page: DashboardPage,
     focus: Focus,
     data: Option<DashboardData>,
-    head: Option<HeadInfo>,
     dashboard_error: Option<String>,
     diff: Option<DiffDocument>,
     diff_error: Option<String>,
@@ -161,7 +160,6 @@ impl AppState {
             dashboard_page,
             focus,
             data: None,
-            head: None,
             dashboard_error: None,
             diff: None,
             diff_error: None,
@@ -383,7 +381,6 @@ where
     let mut next_request_id = 1u64;
     let mut dashboard_request = None;
     let mut diff_request = None;
-    let mut head_request = None;
     let mut commit_files_request = None;
     let mut discard_request = None;
     let mut highlight_request = None;
@@ -393,11 +390,6 @@ where
             target: initial_target,
         })?;
         diff_request = Some(next_request_id);
-        next_request_id += 1;
-        git_worker.request(GitCommand::Head {
-            request_id: next_request_id,
-        })?;
-        head_request = Some(next_request_id);
     } else {
         git_worker.request(GitCommand::Dashboard {
             request_id: next_request_id,
@@ -442,7 +434,6 @@ where
                             .iter()
                             .position(|branch| branch.current)
                             .unwrap_or(0);
-                        state.head = Some(data.head.clone());
                         state.data = Some(data);
                         if matches!(state.screen, Screen::Dashboard)
                             && state.dashboard_page == DashboardPage::History
@@ -465,7 +456,6 @@ where
                     }
                     Ok(
                         GitPayload::Diff(_)
-                        | GitPayload::Head(_)
                         | GitPayload::CommitFiles { .. }
                         | GitPayload::DiscardedWorkingTree,
                     ) => {}
@@ -487,7 +477,6 @@ where
                     }
                     Ok(
                         GitPayload::Dashboard(_)
-                        | GitPayload::Head(_)
                         | GitPayload::CommitFiles { .. }
                         | GitPayload::DiscardedWorkingTree,
                     ) => {}
@@ -519,12 +508,6 @@ where
                     }
                     Ok(_) => {}
                     Err(error) => state.dashboard_error = Some(error.to_string()),
-                }
-                dirty = true;
-            } else if Some(response.request_id) == head_request {
-                head_request = None;
-                if let Ok(GitPayload::Head(head)) = response.result {
-                    state.head = Some(head);
                 }
                 dirty = true;
             } else if commit_files_request
@@ -591,7 +574,6 @@ where
         if refresh_due.is_some_and(|due| Instant::now() >= due)
             && dashboard_request.is_none()
             && diff_request.is_none()
-            && head_request.is_none()
             && commit_files_request.is_none()
             && discard_request.is_none()
         {
@@ -602,19 +584,17 @@ where
                 &mut next_request_id,
                 &mut dashboard_request,
                 &mut diff_request,
-                &mut head_request,
                 history_path.as_ref(),
             )?;
         }
 
         if dirty {
-            terminal.draw(|frame| render(frame, &repo, &state))?;
+            terminal.draw(|frame| render(frame, &state))?;
             dirty = false;
         }
 
         let loading = dashboard_request.is_some()
             || diff_request.is_some()
-            || head_request.is_some()
             || commit_files_request.is_some()
             || discard_request.is_some()
             || highlight_request.is_some();
@@ -1048,7 +1028,6 @@ fn request_realtime_refresh(
     next_request_id: &mut u64,
     dashboard_request: &mut Option<u64>,
     diff_request: &mut Option<u64>,
-    head_request: &mut Option<u64>,
     history_path: Option<&std::path::PathBuf>,
 ) -> Result<()> {
     state.dashboard_error = None;
@@ -1068,12 +1047,6 @@ fn request_realtime_refresh(
         request_diff(worker, next_request_id, diff_request, target.clone())?;
     }
 
-    if state.data.is_none() {
-        let request_id = *next_request_id;
-        *next_request_id += 1;
-        worker.request(GitCommand::Head { request_id })?;
-        *head_request = Some(request_id);
-    }
     Ok(())
 }
 
@@ -1205,59 +1178,16 @@ fn request_commit_files(
     Ok(())
 }
 
-fn render(frame: &mut ratatui::Frame<'_>, repo: &Repository, state: &AppState) {
+fn render(frame: &mut ratatui::Frame<'_>, state: &AppState) {
     let colors = state.colors();
     let background = Style::default()
         .fg(colors.foreground())
         .bg(colors.background());
     frame.render_widget(Block::default().style(background), frame.area());
-    let areas = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(frame.area());
-    let title = match &state.screen {
-        Screen::Dashboard if state.dashboard_page == DashboardPage::History => "history",
-        Screen::Dashboard => "changes · diff workspace",
-        Screen::Diff { target, .. } => target_name(target),
-    };
-    let repository_name = repo
-        .root
-        .file_name()
-        .unwrap_or(repo.root.as_os_str())
-        .to_string_lossy();
-    let head = state
-        .head
-        .as_ref()
-        .map(head_label)
-        .unwrap_or_else(|| " loading…".to_owned());
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " raccoon ",
-                Style::default()
-                    .fg(colors.accent())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{repository_name}  "),
-                Style::default().fg(colors.muted()),
-            ),
-            Span::styled(
-                head,
-                Style::default()
-                    .fg(colors.accent())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  —  {title}"), Style::default().fg(colors.muted())),
-        ]))
-        .style(background),
-        areas[0],
-    );
+    let areas = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
     match &state.screen {
-        Screen::Dashboard => render_dashboard(frame, areas[1], state),
-        Screen::Diff { .. } => render_diff(frame, areas[1], state),
+        Screen::Dashboard => render_dashboard(frame, areas[0], state),
+        Screen::Diff { .. } => render_diff(frame, areas[0], state),
     }
     let help = match (&state.screen, state.dashboard_page) {
         (Screen::Dashboard, DashboardPage::History) => {
@@ -1286,25 +1216,16 @@ fn render(frame: &mut ratatui::Frame<'_>, repo: &Repository, state: &AppState) {
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(colors.muted()).bg(colors.background())),
-        areas[2],
+        areas[1],
     );
     if state.branch_picker {
-        render_branch_picker(frame, areas[1], state);
+        render_branch_picker(frame, areas[0], state);
     }
     if state.theme_picker {
         render_theme_picker(frame, state);
     }
     if state.discard_confirmation {
         render_discard_confirmation(frame, state);
-    }
-}
-
-fn head_label(head: &HeadInfo) -> String {
-    match (&head.branch, &head.short_id) {
-        (Some(branch), Some(_)) => format!(" {}", branch.to_string_lossy()),
-        (Some(branch), None) => format!(" {} · no commits", branch.to_string_lossy()),
-        (None, Some(short_id)) => format!("󰘬 HEAD @ {short_id}"),
-        (None, None) => "󰘬 HEAD unavailable".to_owned(),
     }
 }
 
@@ -2324,20 +2245,6 @@ fn previous_file(document: Option<&DiffDocument>, scroll: usize) -> usize {
                 .map(|(index, _)| index)
         })
         .unwrap_or(scroll)
-}
-
-fn target_name(target: &LaunchTarget) -> &'static str {
-    match target {
-        LaunchTarget::Dashboard => "dashboard",
-        LaunchTarget::WorkingTree { .. } => "working-tree diff",
-        LaunchTarget::Staged { .. } => "staged diff",
-        LaunchTarget::Commit { .. } => "commit diff",
-        LaunchTarget::Compare { .. } => "revision comparison",
-        LaunchTarget::Show { .. } => "revision",
-        LaunchTarget::History { .. } => "history",
-        LaunchTarget::Branches => "branches",
-        LaunchTarget::Changes => "changes",
-    }
 }
 
 #[cfg(test)]

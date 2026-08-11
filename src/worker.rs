@@ -6,7 +6,7 @@ use lru::LruCache;
 
 use crate::{
     cli::LaunchTarget,
-    dashboard::{self, DashboardData, HeadInfo},
+    dashboard::{self, DashboardData},
     diff::DiffDocument,
     git_diff,
     highlight::{HighlightedDiff, Highlighter},
@@ -26,9 +26,6 @@ pub enum GitCommand {
         request_id: u64,
         target: LaunchTarget,
     },
-    Head {
-        request_id: u64,
-    },
     CommitFiles {
         request_id: u64,
         revision: OsString,
@@ -42,7 +39,6 @@ pub enum GitCommand {
 pub enum GitPayload {
     Dashboard(DashboardData),
     Diff(DiffDocument),
-    Head(HeadInfo),
     CommitFiles {
         revision: OsString,
         files: Vec<dashboard::ChangeEntry>,
@@ -96,10 +92,6 @@ fn git_loop(repo: Repository, commands: Receiver<GitCommand>, responses: Sender<
                 let result = load_cached_diff(&repo, &target, &mut cache).map(GitPayload::Diff);
                 (request_id, result)
             }
-            GitCommand::Head { request_id } => (
-                request_id,
-                dashboard::load_head(&repo).map(GitPayload::Head),
-            ),
             GitCommand::CommitFiles {
                 request_id,
                 revision,
