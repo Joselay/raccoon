@@ -1092,10 +1092,26 @@ fn render_history(
         .commits
         .iter()
         .map(|commit| {
-            format!(
-                "{} {} {}  {}",
-                commit.short_id, commit.date, commit.author, commit.subject
-            )
+            Line::from(vec![
+                Span::styled(
+                    commit.short_id.clone(),
+                    Style::default()
+                        .fg(colors.accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(commit.date.clone(), Style::default().fg(colors.muted())),
+                Span::raw(" "),
+                Span::styled(
+                    commit.author.clone(),
+                    Style::default().fg(colors.color(colors.theme.ui.info)),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    commit.subject.clone(),
+                    Style::default().fg(colors.foreground()),
+                ),
+            ])
         })
         .collect::<Vec<_>>();
     render_rows(
@@ -1140,13 +1156,7 @@ fn render_commit_files(
     let rows = state
         .commit_files
         .iter()
-        .map(|change| {
-            format!(
-                "{} {}",
-                change_marker(change.kind),
-                change.path.to_string_lossy()
-            )
-        })
+        .map(|change| change_row(change, colors))
         .collect::<Vec<_>>();
     render_rows(
         frame,
@@ -1170,13 +1180,7 @@ fn render_changes(
 ) {
     let rows = entries
         .iter()
-        .map(|change| {
-            format!(
-                "{} {}",
-                change_marker(change.kind),
-                change.path.to_string_lossy()
-            )
-        })
+        .map(|change| change_row(change, colors))
         .collect::<Vec<_>>();
     render_rows(frame, area, title, focused, selection, &rows, colors);
 }
@@ -1187,7 +1191,7 @@ fn render_rows<T: Into<String>>(
     title: T,
     focused: bool,
     selection: usize,
-    rows: &[String],
+    rows: &[Line<'static>],
     colors: Colors<'_>,
 ) {
     let visible = area.height.saturating_sub(2) as usize;
@@ -1206,17 +1210,30 @@ fn render_rows<T: Into<String>>(
             .take(visible)
             .map(|(index, row)| {
                 let selected = focused && index == selection;
-                Line::styled(
-                    format!("{} {row}", if selected { "›" } else { " " }),
+                let mut spans = Vec::with_capacity(row.spans.len() + 1);
+                spans.push(Span::styled(
+                    if selected { "› " } else { "  " },
                     if selected {
                         Style::default()
                             .fg(colors.selection_foreground())
                             .bg(colors.selected())
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(colors.foreground()).bg(colors.panel())
+                        Style::default().fg(colors.muted()).bg(colors.panel())
                     },
-                )
+                ));
+                spans.extend(row.spans.iter().cloned().map(|mut span| {
+                    span.style = span.style.patch(if selected {
+                        Style::default()
+                            .fg(colors.selection_foreground())
+                            .bg(colors.selected())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().bg(colors.panel())
+                    });
+                    span
+                }));
+                Line::from(spans)
             })
             .collect()
     };
@@ -1228,6 +1245,19 @@ fn render_rows<T: Into<String>>(
         } else {
             colors.border()
         }))
+        .title_style(
+            Style::default()
+                .fg(if focused {
+                    colors.accent()
+                } else {
+                    colors.muted()
+                })
+                .add_modifier(if focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        )
         .style(Style::default().bg(colors.panel()));
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
@@ -1414,6 +1444,19 @@ fn panel<'a>(
             } else {
                 colors.border()
             }))
+            .title_style(
+                Style::default()
+                    .fg(if focused {
+                        colors.accent()
+                    } else {
+                        colors.muted()
+                    })
+                    .add_modifier(if focused {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            )
             .style(Style::default().bg(colors.panel())),
     )
 }
@@ -1443,6 +1486,31 @@ fn change_marker(kind: ChangeKind) -> &'static str {
         ChangeKind::Unmerged => "U",
         ChangeKind::Unknown => "·",
     }
+}
+
+fn change_row(change: &ChangeEntry, colors: Colors<'_>) -> Line<'static> {
+    let marker_color = match change.kind {
+        ChangeKind::Added => colors.color(colors.theme.diff.addition),
+        ChangeKind::Modified | ChangeKind::TypeChanged => colors.color(colors.theme.ui.warning),
+        ChangeKind::Deleted => colors.color(colors.theme.diff.deletion),
+        ChangeKind::Renamed | ChangeKind::Copied => colors.color(colors.theme.diff.header),
+        ChangeKind::Untracked => colors.color(colors.theme.ui.info),
+        ChangeKind::Unmerged => colors.color(colors.theme.ui.error),
+        ChangeKind::Unknown => colors.muted(),
+    };
+    Line::from(vec![
+        Span::styled(
+            change_marker(change.kind),
+            Style::default()
+                .fg(marker_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            change.path.to_string_lossy().into_owned(),
+            Style::default().fg(colors.foreground()),
+        ),
+    ])
 }
 
 fn line_style(kind: LineKind, colors: Colors<'_>) -> Style {
@@ -1543,13 +1611,38 @@ fn render_branch_picker(frame: &mut ratatui::Frame<'_>, content_area: Rect, stat
         .branches
         .iter()
         .map(|branch| {
-            format!(
-                "{} {}  {}  {}",
-                if branch.current { "●" } else { " " },
-                branch.name.to_string_lossy(),
-                branch.short_id,
-                branch.subject
-            )
+            Line::from(vec![
+                Span::styled(
+                    if branch.current { "●" } else { "○" },
+                    Style::default().fg(if branch.current {
+                        colors.color(colors.theme.diff.addition)
+                    } else {
+                        colors.muted()
+                    }),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    branch.name.to_string_lossy().into_owned(),
+                    Style::default()
+                        .fg(if branch.current {
+                            colors.accent()
+                        } else {
+                            colors.foreground()
+                        })
+                        .add_modifier(if branch.current {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    branch.short_id.clone(),
+                    Style::default().fg(colors.color(colors.theme.ui.warning)),
+                ),
+                Span::raw("  "),
+                Span::styled(branch.subject.clone(), Style::default().fg(colors.muted())),
+            ])
         })
         .collect::<Vec<_>>();
     let title = state
