@@ -95,6 +95,7 @@ struct AppState {
     highlighted: Option<HighlightedDiff>,
     highlight_message: Option<String>,
     pending_change_preview: bool,
+    preview_target: Option<LaunchTarget>,
     diff_scroll: usize,
     branch_selection: usize,
     history_selection: usize,
@@ -160,6 +161,7 @@ impl AppState {
             highlighted: None,
             highlight_message: None,
             pending_change_preview: false,
+            preview_target: None,
             diff_scroll: 0,
             branch_selection: 0,
             history_selection: 0,
@@ -252,42 +254,17 @@ impl AppState {
                 Focus::CommitFiles => Focus::History,
                 _ => Focus::History,
             },
-            DashboardPage::Changes => match self.focus {
-                Focus::Staged
-                    if self
-                        .data
-                        .as_ref()
-                        .is_some_and(|data| !data.unstaged.is_empty()) =>
-                {
-                    self.preview_focus = Focus::Unstaged;
-                    Focus::Unstaged
-                }
-                Focus::Staged => {
-                    self.preview_focus = Focus::Staged;
-                    Focus::Diff
-                }
-                Focus::Unstaged => {
-                    self.preview_focus = Focus::Unstaged;
-                    Focus::Diff
-                }
-                Focus::Diff
-                    if self
-                        .data
-                        .as_ref()
-                        .is_some_and(|data| !data.staged.is_empty()) =>
-                {
-                    self.preview_focus = Focus::Staged;
-                    Focus::Staged
-                }
-                Focus::Diff => {
-                    self.preview_focus = Focus::Unstaged;
-                    Focus::Unstaged
-                }
-                _ => {
-                    self.preview_focus = Focus::Staged;
-                    Focus::Staged
-                }
-            },
+            DashboardPage::Changes => {
+                let (has_staged, has_unstaged) = self
+                    .data
+                    .as_ref()
+                    .map(|data| (!data.staged.is_empty(), !data.unstaged.is_empty()))
+                    .unwrap_or_default();
+                let (focus, preview_focus) =
+                    next_changes_focus(self.focus, self.preview_focus, has_staged, has_unstaged);
+                self.preview_focus = preview_focus;
+                focus
+            }
         };
     }
 
@@ -384,6 +361,10 @@ impl AppState {
         }
         self.diff_scroll = self.search_matches[self.search_match_index];
     }
+
+    fn move_diff_scroll(&mut self, delta: isize) {
+        self.diff_scroll = move_diff_scroll(self.diff.as_ref(), self.diff_scroll, delta);
+    }
 }
 
 pub fn run<B: Backend>(
@@ -434,18 +415,27 @@ where
                     Ok(GitPayload::Dashboard(data)) => {
                         reconcile_change_selection(&mut state, &data);
                         if state.dashboard_page == DashboardPage::Changes {
-                            if state.focus == Focus::Unstaged
+                            let active_file_list = if state.focus == Focus::Diff {
+                                state.preview_focus
+                            } else {
+                                state.focus
+                            };
+                            if active_file_list == Focus::Unstaged
                                 && data.unstaged.is_empty()
                                 && !data.staged.is_empty()
                             {
-                                state.focus = Focus::Staged;
                                 state.preview_focus = Focus::Staged;
-                            } else if state.focus == Focus::Staged
+                                if state.focus != Focus::Diff {
+                                    state.focus = Focus::Staged;
+                                }
+                            } else if active_file_list == Focus::Staged
                                 && data.staged.is_empty()
                                 && !data.unstaged.is_empty()
                             {
-                                state.focus = Focus::Unstaged;
                                 state.preview_focus = Focus::Unstaged;
+                                if state.focus != Focus::Diff {
+                                    state.focus = Focus::Unstaged;
+                                }
                             }
                         }
                         state.history_selection = state
@@ -835,7 +825,7 @@ where
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
                     if state.focus == Focus::Diff {
-                        state.diff_scroll = state.diff_scroll.saturating_add(1);
+                        state.move_diff_scroll(1);
                     } else if state.move_selection(1) {
                         refresh_dashboard_preview(
                             &mut state,
@@ -849,7 +839,7 @@ where
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     if state.focus == Focus::Diff {
-                        state.diff_scroll = state.diff_scroll.saturating_sub(1);
+                        state.move_diff_scroll(-1);
                     } else if state.move_selection(-1) {
                         refresh_dashboard_preview(
                             &mut state,
@@ -863,7 +853,7 @@ where
                 }
                 KeyCode::PageDown => {
                     if state.focus == Focus::Diff {
-                        state.diff_scroll = state.diff_scroll.saturating_add(20);
+                        state.move_diff_scroll(20);
                     } else if state.move_selection(10) {
                         refresh_dashboard_preview(
                             &mut state,
@@ -877,7 +867,7 @@ where
                 }
                 KeyCode::PageUp => {
                     if state.focus == Focus::Diff {
-                        state.diff_scroll = state.diff_scroll.saturating_sub(20);
+                        state.move_diff_scroll(-20);
                     } else if state.move_selection(-10) {
                         refresh_dashboard_preview(
                             &mut state,
@@ -905,7 +895,7 @@ where
                 }
                 KeyCode::End | KeyCode::Char('G') => {
                     if state.focus == Focus::Diff {
-                        state.diff_scroll = usize::MAX;
+                        state.move_diff_scroll(isize::MAX);
                     } else if state.move_selection(isize::MAX) {
                         refresh_dashboard_preview(
                             &mut state,
@@ -1000,6 +990,7 @@ where
                 KeyCode::Esc | KeyCode::Char('b') if !direct => {
                     state.screen = Screen::Dashboard;
                     if state.dashboard_page == DashboardPage::Changes {
+                        state.preview_target = None;
                         request_change_preview(
                             &mut state,
                             &git_worker,
@@ -1008,15 +999,12 @@ where
                         )?;
                     }
                 }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    state.diff_scroll = state.diff_scroll.saturating_add(1)
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    state.diff_scroll = state.diff_scroll.saturating_sub(1)
-                }
-                KeyCode::PageDown => state.diff_scroll = state.diff_scroll.saturating_add(20),
-                KeyCode::PageUp => state.diff_scroll = state.diff_scroll.saturating_sub(20),
+                KeyCode::Char('j') | KeyCode::Down => state.move_diff_scroll(1),
+                KeyCode::Char('k') | KeyCode::Up => state.move_diff_scroll(-1),
+                KeyCode::PageDown => state.move_diff_scroll(20),
+                KeyCode::PageUp => state.move_diff_scroll(-20),
                 KeyCode::Home | KeyCode::Char('g') => state.diff_scroll = 0,
+                KeyCode::End | KeyCode::Char('G') => state.move_diff_scroll(isize::MAX),
                 KeyCode::Char('n') => {
                     state.diff_scroll = next_hunk(state.diff.as_ref(), state.diff_scroll)
                 }
@@ -1037,6 +1025,52 @@ where
         dirty = true;
     }
     Ok(())
+}
+
+fn next_changes_focus(
+    focus: Focus,
+    preview_focus: Focus,
+    has_staged: bool,
+    has_unstaged: bool,
+) -> (Focus, Focus) {
+    match focus {
+        Focus::Staged => (Focus::Diff, Focus::Staged),
+        Focus::Unstaged => (Focus::Diff, Focus::Unstaged),
+        Focus::Diff if preview_focus == Focus::Staged && has_staged => {
+            (Focus::Staged, Focus::Staged)
+        }
+        Focus::Diff if preview_focus == Focus::Unstaged && has_unstaged => {
+            (Focus::Unstaged, Focus::Unstaged)
+        }
+        Focus::Diff if has_staged => (Focus::Staged, Focus::Staged),
+        Focus::Diff => (Focus::Unstaged, Focus::Unstaged),
+        _ if has_staged => (Focus::Staged, Focus::Staged),
+        _ => (Focus::Unstaged, Focus::Unstaged),
+    }
+}
+
+fn move_diff_scroll(document: Option<&DiffDocument>, current_line: usize, delta: isize) -> usize {
+    let Some(document) = document else {
+        return current_line;
+    };
+    let visible_lines = document
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| is_visible_diff_line(line.kind).then_some(index))
+        .collect::<Vec<_>>();
+    if visible_lines.is_empty() {
+        return 0;
+    }
+    let current_position = visible_lines
+        .partition_point(|line_index| *line_index < current_line)
+        .min(visible_lines.len() - 1);
+    let next_position = if delta == isize::MAX {
+        visible_lines.len() - 1
+    } else {
+        (current_position as isize + delta).clamp(0, visible_lines.len() as isize - 1) as usize
+    };
+    visible_lines[next_position]
 }
 
 fn needs_diff(target: &LaunchTarget) -> bool {
@@ -1096,12 +1130,14 @@ fn reconcile_change_selection(state: &mut AppState, data: &DashboardData) {
     match selected {
         Some(LaunchTarget::Staged { path }) => {
             if let Some(index) = data.staged.iter().position(|entry| entry.path == path) {
-                state.staged_selection = index;
+                state.staged_selection =
+                    tree_selection_for_entry(&data.staged, index).unwrap_or_default();
             }
         }
         Some(LaunchTarget::WorkingTree { path }) => {
             if let Some(index) = data.unstaged.iter().position(|entry| entry.path == path) {
-                state.unstaged_selection = index;
+                state.unstaged_selection =
+                    tree_selection_for_entry(&data.unstaged, index).unwrap_or_default();
             }
         }
         _ => {}
@@ -1119,28 +1155,36 @@ fn request_change_preview(
     }
     let Some(target) = state.selected_target() else {
         state.pending_change_preview = false;
+        state.preview_target = None;
         state.diff = None;
         state.diff_error = None;
         state.highlighted = None;
         state.highlight_message = None;
         return Ok(());
     };
+    let target_changed = state.preview_target.as_ref() != Some(&target);
+    state.preview_target = Some(target.clone());
     if current_request.is_some() {
         // Keep only the newest selection while Git is busy. This makes rapid
         // navigation responsive without filling the bounded worker queue.
         state.pending_change_preview = true;
-        state.diff = None;
-        state.diff_error = None;
-        state.highlighted = None;
+        if target_changed {
+            state.diff = None;
+            state.diff_error = None;
+            state.highlighted = None;
+            state.diff_scroll = 0;
+        }
         return Ok(());
     }
     state.pending_change_preview = false;
-    state.diff = None;
     state.diff_error = None;
-    state.highlighted = None;
     state.highlight_message = None;
     state.search_matches.clear();
-    state.diff_scroll = 0;
+    if target_changed {
+        state.diff = None;
+        state.highlighted = None;
+        state.diff_scroll = 0;
+    }
     request_diff(worker, next_request_id, current_request, target)
 }
 
@@ -1307,7 +1351,11 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState
                 frame,
                 sidebar[0],
                 format!("STAGED · {}", data.staged.len()),
-                state.focus == Focus::Staged,
+                RowFocus {
+                    focused: state.focus == Focus::Staged,
+                    selection_visible: state.focus == Focus::Staged
+                        || (state.focus == Focus::Diff && state.preview_focus == Focus::Staged),
+                },
                 state.staged_selection,
                 &data.staged,
                 colors,
@@ -1316,7 +1364,11 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState
                 frame,
                 sidebar[1],
                 format!("UNSTAGED · {}", data.unstaged.len()),
-                state.focus == Focus::Unstaged,
+                RowFocus {
+                    focused: state.focus == Focus::Unstaged,
+                    selection_visible: state.focus == Focus::Unstaged
+                        || (state.focus == Focus::Diff && state.preview_focus == Focus::Unstaged),
+                },
                 state.unstaged_selection,
                 &data.unstaged,
                 colors,
@@ -1377,7 +1429,7 @@ fn render_history(
         frame,
         area,
         "History",
-        state.focus == Focus::History,
+        RowFocus::focused(state.focus == Focus::History),
         state.history_selection,
         &rows,
         colors,
@@ -1416,7 +1468,7 @@ fn render_commit_files(
         frame,
         area,
         title,
-        state.focus == Focus::CommitFiles,
+        RowFocus::focused(state.focus == Focus::CommitFiles),
         state.commit_file_selection,
         &state.commit_files,
         colors,
@@ -1434,11 +1486,26 @@ struct ChangeTreeRow {
     entry_index: Option<usize>,
 }
 
+#[derive(Clone, Copy)]
+struct RowFocus {
+    focused: bool,
+    selection_visible: bool,
+}
+
+impl RowFocus {
+    fn focused(focused: bool) -> Self {
+        Self {
+            focused,
+            selection_visible: focused,
+        }
+    }
+}
+
 fn render_change_tree<T: Into<String>>(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     title: T,
-    focused: bool,
+    row_focus: RowFocus,
     selection: usize,
     entries: &[ChangeEntry],
     colors: Colors<'_>,
@@ -1452,7 +1519,7 @@ fn render_change_tree<T: Into<String>>(
         })
         .unwrap_or(0);
     let lines = rows.into_iter().map(|row| row.line).collect::<Vec<_>>();
-    render_rows(frame, area, title, focused, selected_row, &lines, colors);
+    render_rows(frame, area, title, row_focus, selected_row, &lines, colors);
 }
 
 fn change_tree_rows(entries: &[ChangeEntry], colors: Colors<'_>) -> Vec<ChangeTreeRow> {
@@ -1487,6 +1554,13 @@ fn selected_tree_entry_index(entries: &[ChangeEntry], selection: usize) -> Optio
     let mut indexes = Vec::with_capacity(entries.len());
     append_change_tree_indexes(&root, &mut indexes);
     indexes.get(selection).copied()
+}
+
+fn tree_selection_for_entry(entries: &[ChangeEntry], entry_index: usize) -> Option<usize> {
+    let root = build_change_tree(entries);
+    let mut indexes = Vec::with_capacity(entries.len());
+    append_change_tree_indexes(&root, &mut indexes);
+    indexes.iter().position(|index| *index == entry_index)
 }
 
 fn append_change_tree_indexes(node: &ChangeTreeNode, indexes: &mut Vec<usize>) {
@@ -1618,7 +1692,7 @@ fn render_rows<T: Into<String>>(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     title: T,
-    focused: bool,
+    row_focus: RowFocus,
     selection: usize,
     rows: &[Line<'static>],
     colors: Colors<'_>,
@@ -1638,7 +1712,7 @@ fn render_rows<T: Into<String>>(
             .skip(start)
             .take(visible)
             .map(|(index, row)| {
-                let selected = focused && index == selection;
+                let selected = row_focus.selection_visible && index == selection;
                 let mut spans = Vec::with_capacity(row.spans.len() + 1);
                 spans.push(Span::styled(
                     if selected { "▎ " } else { "  " },
@@ -1666,19 +1740,19 @@ fn render_rows<T: Into<String>>(
     let block = Block::default()
         .title(format!(" {} ", title.into()))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if focused {
+        .border_style(Style::default().fg(if row_focus.focused {
             colors.focused_border()
         } else {
             colors.border()
         }))
         .title_style(
             Style::default()
-                .fg(if focused {
+                .fg(if row_focus.focused {
                     colors.accent()
                 } else {
                     colors.muted()
                 })
-                .add_modifier(if focused {
+                .add_modifier(if row_focus.focused {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
@@ -1699,9 +1773,7 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
         );
     } else if let Some(document) = &state.diff {
         let available = area.height.saturating_sub(2) as usize;
-        let scroll = state
-            .diff_scroll
-            .min(document.lines.len().saturating_sub(available));
+        let scroll = diff_scroll_start(document, state.diff_scroll, available);
         let lines = document
             .lines
             .iter()
@@ -1831,6 +1903,23 @@ fn is_visible_diff_line(kind: LineKind) -> bool {
             | LineKind::NewFile
             | LineKind::DeletedFile
     )
+}
+
+fn diff_scroll_start(document: &DiffDocument, requested_line: usize, available: usize) -> usize {
+    let visible_lines = document
+        .lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| is_visible_diff_line(line.kind).then_some(index))
+        .collect::<Vec<_>>();
+    if visible_lines.is_empty() {
+        return 0;
+    }
+    let requested_position = visible_lines
+        .partition_point(|line_index| *line_index < requested_line)
+        .min(visible_lines.len() - 1);
+    let last_full_page_start = visible_lines.len().saturating_sub(available.max(1));
+    visible_lines[requested_position.min(last_full_page_start)]
 }
 
 fn diff_content_offset(kind: LineKind, text: &str) -> usize {
@@ -2040,7 +2129,7 @@ fn render_branch_picker(frame: &mut ratatui::Frame<'_>, content_area: Rect, stat
         frame,
         area,
         title,
-        true,
+        RowFocus::focused(true),
         state.branch_selection,
         &rows,
         colors,
@@ -2255,6 +2344,8 @@ mod tests {
             ["assets/icon.svg", "src/app.rs", "src/lib.rs", "README.md"]
                 .map(std::path::PathBuf::from)
         );
+        assert_eq!(tree_selection_for_entry(&entries, 0), Some(3));
+        assert_eq!(tree_selection_for_entry(&entries, 2), Some(1));
     }
 
     #[test]
@@ -2276,6 +2367,49 @@ mod tests {
             diff_content_offset(LineKind::Binary, "Binary files differ"),
             0
         );
+    }
+
+    #[test]
+    fn tab_toggles_staged_files_and_their_diff() {
+        let (focus, source) = next_changes_focus(Focus::Staged, Focus::Staged, true, true);
+        assert_eq!((focus, source), (Focus::Diff, Focus::Staged));
+
+        let (focus, source) = next_changes_focus(focus, source, true, true);
+        assert_eq!((focus, source), (Focus::Staged, Focus::Staged));
+    }
+
+    #[test]
+    fn tab_toggles_unstaged_files_and_their_diff() {
+        let (focus, source) = next_changes_focus(Focus::Unstaged, Focus::Unstaged, true, true);
+        assert_eq!((focus, source), (Focus::Diff, Focus::Unstaged));
+
+        let (focus, source) = next_changes_focus(focus, source, true, true);
+        assert_eq!((focus, source), (Focus::Unstaged, Focus::Unstaged));
+    }
+
+    #[test]
+    fn tab_returns_to_an_available_file_list_after_live_update() {
+        assert_eq!(
+            next_changes_focus(Focus::Diff, Focus::Staged, false, true),
+            (Focus::Unstaged, Focus::Unstaged)
+        );
+        assert_eq!(
+            next_changes_focus(Focus::Diff, Focus::Unstaged, true, false),
+            (Focus::Staged, Focus::Staged)
+        );
+    }
+
+    #[test]
+    fn diff_scrolling_counts_only_visible_lines() {
+        let document = DiffDocument::parse(
+            b"diff --git a/a b/a\nindex 1..2 100644\n--- a/a\n+++ b/a\n@@ -1,2 +1,2 @@\n-old\n+new\n same\n"
+                .to_vec(),
+        );
+
+        assert_eq!(move_diff_scroll(Some(&document), 0, 1), 6);
+        assert_eq!(move_diff_scroll(Some(&document), 6, -1), 5);
+        assert_eq!(move_diff_scroll(Some(&document), 0, 20), 7);
+        assert_eq!(diff_scroll_start(&document, usize::MAX, 2), 6);
     }
 
     fn change(path: &str) -> ChangeEntry {
