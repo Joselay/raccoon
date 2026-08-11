@@ -2,6 +2,12 @@
 
 Raccoon is a read-only, performance-focused Git TUI for reaching and inspecting diffs quickly. It targets Ghostty true color while remaining portable through Crossterm.
 
+Repository and Material-style file icons use Nerd Font glyphs. Configure Ghostty or
+your terminal with a Nerd Font for the intended appearance.
+
+Changed files are grouped into expanded directory trees while selection and opening
+remain file-oriented.
+
 ## Install
 
 ```sh

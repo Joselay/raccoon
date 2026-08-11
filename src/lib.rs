@@ -6,6 +6,7 @@ pub mod cli;
 pub mod config;
 pub mod dashboard;
 pub mod diff;
+pub mod file_icon;
 pub mod git_diff;
 pub mod highlight;
 pub mod repository;

@@ -1,4 +1,4 @@
-use std::{ffi::OsString, time::Duration};
+use std::{collections::BTreeMap, ffi::OsString, time::Duration};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -16,6 +16,7 @@ use crate::{
     config::{AppConfig, ConfigPaths, ThemeConfig},
     dashboard::{ChangeEntry, ChangeKind, DashboardData, HeadInfo},
     diff::{DiffDocument, LineKind},
+    file_icon::{self, IconColor},
     highlight::{HighlightedDiff, SyntaxToken},
     repository::Repository,
     theme::{LoadedTheme, Rgb, Theme},
@@ -246,26 +247,26 @@ impl AppState {
             }
             Focus::CommitFiles => {
                 let commit = data.commits.get(self.history_selection)?;
-                self.commit_files
-                    .get(self.commit_file_selection)
-                    .map(|file| LaunchTarget::Commit {
+                selected_tree_entry(&self.commit_files, self.commit_file_selection).map(|file| {
+                    LaunchTarget::Commit {
                         revision: commit.id.clone(),
                         path: Some(file.path.clone()),
-                    })
+                    }
+                })
             }
             Focus::Staged => {
-                data.staged
-                    .get(self.staged_selection)
-                    .map(|change| LaunchTarget::Staged {
+                selected_tree_entry(&data.staged, self.staged_selection).map(|change| {
+                    LaunchTarget::Staged {
                         path: change.path.clone(),
-                    })
+                    }
+                })
             }
             Focus::Unstaged => {
-                data.unstaged
-                    .get(self.unstaged_selection)
-                    .map(|change| LaunchTarget::WorkingTree {
+                selected_tree_entry(&data.unstaged, self.unstaged_selection).map(|change| {
+                    LaunchTarget::WorkingTree {
                         path: change.path.clone(),
-                    })
+                    }
+                })
             }
         }
     }
@@ -1153,18 +1154,13 @@ fn render_commit_files(
         );
         return;
     }
-    let rows = state
-        .commit_files
-        .iter()
-        .map(|change| change_row(change, colors))
-        .collect::<Vec<_>>();
-    render_rows(
+    render_change_tree(
         frame,
         area,
         title,
         state.focus == Focus::CommitFiles,
         state.commit_file_selection,
-        &rows,
+        &state.commit_files,
         colors,
     );
 }
@@ -1178,11 +1174,188 @@ fn render_changes(
     focused: bool,
     colors: Colors<'_>,
 ) {
-    let rows = entries
-        .iter()
-        .map(|change| change_row(change, colors))
-        .collect::<Vec<_>>();
-    render_rows(frame, area, title, focused, selection, &rows, colors);
+    render_change_tree(frame, area, title, focused, selection, entries, colors);
+}
+
+#[derive(Default)]
+struct ChangeTreeNode {
+    directories: BTreeMap<OsString, ChangeTreeNode>,
+    files: BTreeMap<OsString, usize>,
+}
+
+struct ChangeTreeRow {
+    line: Line<'static>,
+    entry_index: Option<usize>,
+}
+
+fn render_change_tree<T: Into<String>>(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    title: T,
+    focused: bool,
+    selection: usize,
+    entries: &[ChangeEntry],
+    colors: Colors<'_>,
+) {
+    let rows = change_tree_rows(entries, colors);
+    let selected_entry_index = rows.iter().filter_map(|row| row.entry_index).nth(selection);
+    let selected_row = selected_entry_index
+        .and_then(|entry_index| {
+            rows.iter()
+                .position(|row| row.entry_index == Some(entry_index))
+        })
+        .unwrap_or(0);
+    let lines = rows.into_iter().map(|row| row.line).collect::<Vec<_>>();
+    render_rows(frame, area, title, focused, selected_row, &lines, colors);
+}
+
+fn change_tree_rows(entries: &[ChangeEntry], colors: Colors<'_>) -> Vec<ChangeTreeRow> {
+    let root = build_change_tree(entries);
+    let mut rows = Vec::new();
+    append_change_tree_rows(&root, "", entries, colors, &mut rows);
+    rows
+}
+
+fn build_change_tree(entries: &[ChangeEntry]) -> ChangeTreeNode {
+    let mut root = ChangeTreeNode::default();
+    for (entry_index, entry) in entries.iter().enumerate() {
+        let components = entry
+            .path
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(name) => Some(name.to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        insert_change_path(&mut root, &components, entry_index);
+    }
+    root
+}
+
+fn selected_tree_entry(entries: &[ChangeEntry], selection: usize) -> Option<&ChangeEntry> {
+    let root = build_change_tree(entries);
+    let mut indexes = Vec::with_capacity(entries.len());
+    append_change_tree_indexes(&root, &mut indexes);
+    indexes
+        .get(selection)
+        .and_then(|entry_index| entries.get(*entry_index))
+}
+
+fn append_change_tree_indexes(node: &ChangeTreeNode, indexes: &mut Vec<usize>) {
+    for child in node.directories.values() {
+        append_change_tree_indexes(child, indexes);
+    }
+    indexes.extend(node.files.values().copied());
+}
+
+fn insert_change_path(node: &mut ChangeTreeNode, components: &[OsString], entry_index: usize) {
+    let Some((name, remaining)) = components.split_first() else {
+        return;
+    };
+    if remaining.is_empty() {
+        node.files.insert(name.clone(), entry_index);
+    } else {
+        insert_change_path(
+            node.directories.entry(name.clone()).or_default(),
+            remaining,
+            entry_index,
+        );
+    }
+}
+
+fn append_change_tree_rows(
+    node: &ChangeTreeNode,
+    prefix: &str,
+    entries: &[ChangeEntry],
+    colors: Colors<'_>,
+    rows: &mut Vec<ChangeTreeRow>,
+) {
+    let child_count = node.directories.len() + node.files.len();
+    let mut child_index = 0;
+    for (name, child) in &node.directories {
+        child_index += 1;
+        let last = child_index == child_count;
+        rows.push(ChangeTreeRow {
+            line: directory_tree_row(prefix, last, name, colors),
+            entry_index: None,
+        });
+        let child_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
+        append_change_tree_rows(child, &child_prefix, entries, colors, rows);
+    }
+    for (name, entry_index) in &node.files {
+        child_index += 1;
+        let last = child_index == child_count;
+        rows.push(ChangeTreeRow {
+            line: file_tree_row(prefix, last, name, &entries[*entry_index], colors),
+            entry_index: Some(*entry_index),
+        });
+    }
+}
+
+fn directory_tree_row(
+    prefix: &str,
+    last: bool,
+    name: &std::ffi::OsStr,
+    colors: Colors<'_>,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{prefix}{} ", if last { "└─" } else { "├─" }),
+            Style::default().fg(colors.border()),
+        ),
+        Span::styled(
+            "",
+            Style::default().fg(colors.color(colors.theme.syntax.constant)),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            name.to_string_lossy().into_owned(),
+            Style::default()
+                .fg(colors.accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn file_tree_row(
+    prefix: &str,
+    last: bool,
+    name: &std::ffi::OsStr,
+    change: &ChangeEntry,
+    colors: Colors<'_>,
+) -> Line<'static> {
+    let marker_color = match change.kind {
+        ChangeKind::Added => colors.color(colors.theme.diff.addition),
+        ChangeKind::Modified | ChangeKind::TypeChanged => colors.color(colors.theme.ui.warning),
+        ChangeKind::Deleted => colors.color(colors.theme.diff.deletion),
+        ChangeKind::Renamed | ChangeKind::Copied => colors.color(colors.theme.diff.header),
+        ChangeKind::Untracked => colors.color(colors.theme.ui.info),
+        ChangeKind::Unmerged => colors.color(colors.theme.ui.error),
+        ChangeKind::Unknown => colors.muted(),
+    };
+    let icon = file_icon::for_path(&change.path);
+    Line::from(vec![
+        Span::styled(
+            format!("{prefix}{} ", if last { "└─" } else { "├─" }),
+            Style::default().fg(colors.border()),
+        ),
+        Span::styled(
+            change_marker(change.kind),
+            Style::default()
+                .fg(marker_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            icon.glyph,
+            Style::default().fg(file_icon_color(icon.color, colors)),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            name.to_string_lossy().into_owned(),
+            Style::default().fg(colors.foreground()),
+        ),
+    ])
 }
 
 fn render_rows<T: Into<String>>(
@@ -1488,29 +1661,18 @@ fn change_marker(kind: ChangeKind) -> &'static str {
     }
 }
 
-fn change_row(change: &ChangeEntry, colors: Colors<'_>) -> Line<'static> {
-    let marker_color = match change.kind {
-        ChangeKind::Added => colors.color(colors.theme.diff.addition),
-        ChangeKind::Modified | ChangeKind::TypeChanged => colors.color(colors.theme.ui.warning),
-        ChangeKind::Deleted => colors.color(colors.theme.diff.deletion),
-        ChangeKind::Renamed | ChangeKind::Copied => colors.color(colors.theme.diff.header),
-        ChangeKind::Untracked => colors.color(colors.theme.ui.info),
-        ChangeKind::Unmerged => colors.color(colors.theme.ui.error),
-        ChangeKind::Unknown => colors.muted(),
-    };
-    Line::from(vec![
-        Span::styled(
-            change_marker(change.kind),
-            Style::default()
-                .fg(marker_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            change.path.to_string_lossy().into_owned(),
-            Style::default().fg(colors.foreground()),
-        ),
-    ])
+fn file_icon_color(color: IconColor, colors: Colors<'_>) -> Color {
+    colors.color(match color {
+        IconColor::Blue => colors.theme.syntax.function,
+        IconColor::Cyan => colors.theme.syntax.r#type,
+        IconColor::Green => colors.theme.syntax.string,
+        IconColor::Yellow => colors.theme.syntax.constant,
+        IconColor::Orange => colors.theme.syntax.number,
+        IconColor::Red => colors.theme.ui.error,
+        IconColor::Purple => colors.theme.syntax.keyword,
+        IconColor::Pink => colors.theme.syntax.tag,
+        IconColor::Muted => colors.theme.ui.muted,
+    })
 }
 
 fn line_style(kind: LineKind, colors: Colors<'_>) -> Style {
@@ -1817,5 +1979,42 @@ fn target_name(target: &LaunchTarget) -> &'static str {
         LaunchTarget::History { .. } => "history",
         LaunchTarget::Branches => "branches",
         LaunchTarget::Changes => "changes",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tree_selection_follows_visual_directory_order() {
+        let entries = [
+            change("README.md"),
+            change("src/lib.rs"),
+            change("src/app.rs"),
+            change("assets/icon.svg"),
+        ];
+
+        let ordered = (0..entries.len())
+            .map(|selection| {
+                selected_tree_entry(&entries, selection)
+                    .unwrap()
+                    .path
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordered,
+            ["assets/icon.svg", "src/app.rs", "src/lib.rs", "README.md"]
+                .map(std::path::PathBuf::from)
+        );
+    }
+
+    fn change(path: &str) -> ChangeEntry {
+        ChangeEntry {
+            path: path.into(),
+            kind: ChangeKind::Modified,
+        }
     }
 }
