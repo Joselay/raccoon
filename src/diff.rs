@@ -59,11 +59,21 @@ impl DiffDocument {
                 file_index = Some(files.len() - 1);
                 (LineKind::FileHeader, None, None)
             } else if visible.starts_with("+++ ") {
-                if let Some(index) = file_index {
-                    files[index] = parse_new_path(visible);
+                if let Some(index) = file_index
+                    && let Some(path) = parse_file_path(visible, "+++ ", "b/")
+                {
+                    files[index] = Some(path);
                 }
                 (LineKind::FileHeader, None, None)
-            } else if visible.starts_with("index ") || visible.starts_with("--- ") {
+            } else if visible.starts_with("--- ") {
+                if let Some(index) = file_index
+                    && files[index].is_none()
+                    && let Some(path) = parse_file_path(visible, "--- ", "a/")
+                {
+                    files[index] = Some(path);
+                }
+                (LineKind::FileHeader, None, None)
+            } else if visible.starts_with("index ") {
                 (LineKind::FileHeader, None, None)
             } else if visible.starts_with("Binary files ")
                 || visible.starts_with("GIT binary patch")
@@ -131,12 +141,12 @@ impl DiffDocument {
     }
 }
 
-fn parse_new_path(line: &str) -> Option<PathBuf> {
-    let value = line.strip_prefix("+++ ")?;
+fn parse_file_path(line: &str, marker: &str, prefix: &str) -> Option<PathBuf> {
+    let value = line.strip_prefix(marker)?;
     if value == "/dev/null" {
         return None;
     }
-    Some(Path::new(value.strip_prefix("b/").unwrap_or(value)).to_path_buf())
+    Some(Path::new(value.strip_prefix(prefix).unwrap_or(value)).to_path_buf())
 }
 
 fn parse_hunk_header(header: &str) -> Option<(u32, u32)> {
@@ -209,5 +219,16 @@ mod tests {
                 .iter()
                 .any(|line| line.kind == LineKind::NoNewline)
         );
+    }
+
+    #[test]
+    fn keeps_a_display_path_for_new_deleted_and_renamed_files() {
+        let document = DiffDocument::parse(
+            b"diff --git a/old.rs b/old.rs\n--- a/old.rs\n+++ /dev/null\ndiff --git a/dev/null b/new.rs\n--- /dev/null\n+++ b/new.rs\ndiff --git a/before.rs b/after.rs\n--- a/before.rs\n+++ b/after.rs\n"
+                .to_vec(),
+        );
+        assert_eq!(document.files[0].as_deref(), Some(Path::new("old.rs")));
+        assert_eq!(document.files[1].as_deref(), Some(Path::new("new.rs")));
+        assert_eq!(document.files[2].as_deref(), Some(Path::new("after.rs")));
     }
 }

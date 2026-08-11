@@ -870,14 +870,6 @@ fn render_rows<T: Into<String>>(
 
 fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
     let colors = state.colors();
-    let body = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(colors.border()))
-        .style(
-            Style::default()
-                .fg(colors.foreground())
-                .bg(colors.background()),
-        );
     if let Some(message) = &state.diff_error {
         frame.render_widget(
             Paragraph::new(format!("Git error\n\n{message}"))
@@ -886,7 +878,7 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                         .fg(colors.color(colors.theme.ui.error))
                         .bg(colors.background()),
                 )
-                .block(body),
+                .block(diff_block(" Diff ", colors)),
             area,
         );
     } else if let Some(document) = &state.diff {
@@ -894,6 +886,7 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
         let scroll = state
             .diff_scroll
             .min(document.lines.len().saturating_sub(available));
+        let title = diff_file_title(document, scroll);
         let lines = document
             .lines
             .iter()
@@ -974,6 +967,9 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                 } else {
                     spans.push(Span::styled(text, style));
                 }
+                // Paragraph truncates overflowing spans, so this paints the
+                // semantic background through the right edge of the viewport.
+                spans.push(Span::styled(" ".repeat(area.width as usize), style));
                 Line::from(spans)
             })
             .collect::<Vec<_>>();
@@ -984,7 +980,7 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                         .fg(colors.foreground())
                         .bg(colors.background()),
                 )
-                .block(body)
+                .block(diff_block(&title, colors))
         } else {
             Paragraph::new(lines)
                 .style(
@@ -992,7 +988,7 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                         .fg(colors.foreground())
                         .bg(colors.background()),
                 )
-                .block(body)
+                .block(diff_block(&title, colors))
         };
         frame.render_widget(paragraph, area);
     } else {
@@ -1003,10 +999,40 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                         .fg(colors.foreground())
                         .bg(colors.background()),
                 )
-                .block(body),
+                .block(diff_block(" Diff ", colors)),
             area,
         );
     }
+}
+
+fn diff_block<'a>(title: &'a str, colors: Colors<'_>) -> Block<'a> {
+    Block::default()
+        .title(title)
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(colors.focused_border()))
+        .style(
+            Style::default()
+                .fg(colors.foreground())
+                .bg(colors.background()),
+        )
+}
+
+fn diff_file_title(document: &DiffDocument, scroll: usize) -> String {
+    let Some(file_index) = document.lines.get(scroll).and_then(|line| line.file_index) else {
+        return " Diff ".to_owned();
+    };
+    let path = document
+        .files
+        .get(file_index)
+        .and_then(|path| path.as_deref())
+        .map(|path| path.to_string_lossy())
+        .unwrap_or_else(|| "<unknown file>".into());
+    format!(
+        " File {}/{} — {} ",
+        file_index + 1,
+        document.files.len(),
+        path
+    )
 }
 
 fn panel<'a>(
@@ -1069,7 +1095,7 @@ fn line_style(kind: LineKind, colors: Colors<'_>) -> Style {
         LineKind::FileHeader => Style::default()
             .fg(colors.color(colors.theme.diff.header))
             .add_modifier(Modifier::BOLD)
-            .bg(colors.background()),
+            .bg(colors.color(colors.theme.ui.panel)),
         LineKind::Context => Style::default()
             .fg(colors.color(colors.theme.diff.context))
             .bg(colors.background()),
