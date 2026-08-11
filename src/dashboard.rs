@@ -23,6 +23,12 @@ pub struct BranchEntry {
     pub current: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HeadInfo {
+    pub branch: Option<OsString>,
+    pub short_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeKind {
     Added,
@@ -48,17 +54,20 @@ pub struct DashboardData {
     pub branches: Vec<BranchEntry>,
     pub staged: Vec<ChangeEntry>,
     pub unstaged: Vec<ChangeEntry>,
+    pub head: HeadInfo,
 }
 
 pub fn load(repo: &Repository, history_path: Option<&PathBuf>) -> Result<DashboardData> {
     let commits = load_history(repo, history_path)?;
-    let branches = load_branches(repo)?;
+    let head = load_head(repo)?;
+    let branches = load_branches(repo, head.branch.as_deref())?;
     let (staged, unstaged) = load_status(repo)?;
     Ok(DashboardData {
         commits,
         branches,
         staged,
         unstaged,
+        head,
     })
 }
 
@@ -104,12 +113,24 @@ pub fn load_history(repo: &Repository, path: Option<&PathBuf>) -> Result<Vec<Com
         .collect())
 }
 
-pub fn load_branches(repo: &Repository) -> Result<Vec<BranchEntry>> {
-    let current_output = repo.git(["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-    let current = current_output
+pub fn load_head(repo: &Repository) -> Result<HeadInfo> {
+    let branch_output = repo.git(["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    let branch = branch_output
         .status
         .success()
-        .then(|| trim_ascii(&current_output.stdout));
+        .then(|| bytes_to_os_string(&trim_ascii(&branch_output.stdout)));
+    let revision_output = repo.git(["rev-parse", "--verify", "--short", "HEAD"])?;
+    let short_id = revision_output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&trim_ascii(&revision_output.stdout)).into_owned());
+    Ok(HeadInfo { branch, short_id })
+}
+
+pub fn load_branches(
+    repo: &Repository,
+    current: Option<&std::ffi::OsStr>,
+) -> Result<Vec<BranchEntry>> {
     let output = repo.git([
         "for-each-ref",
         "--format=%(refname:short)%00%(objectname:short)%00%(subject)%00",
@@ -126,14 +147,67 @@ pub fn load_branches(repo: &Repository) -> Result<Vec<BranchEntry>> {
         .chunks_exact(3)
         .map(|field| {
             let name_bytes = field[0].strip_prefix(b"\n").unwrap_or(field[0]);
+            let name = bytes_to_os_string(name_bytes);
             BranchEntry {
-                name: bytes_to_os_string(name_bytes),
+                current: current == Some(name.as_os_str()),
+                name,
                 short_id: String::from_utf8_lossy(field[1]).into_owned(),
                 subject: String::from_utf8_lossy(field[2]).into_owned(),
-                current: current.as_deref() == Some(name_bytes),
             }
         })
         .collect())
+}
+
+pub fn load_commit_files(
+    repo: &Repository,
+    revision: &std::ffi::OsStr,
+    path: Option<&PathBuf>,
+) -> Result<Vec<ChangeEntry>> {
+    let mut args: Vec<OsString> = [
+        "diff-tree",
+        "--root",
+        "--first-parent",
+        "--no-commit-id",
+        "--name-status",
+        "-r",
+        "-z",
+        "-M",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    args.push(revision.to_owned());
+    if let Some(path) = path {
+        args.push("--".into());
+        args.push(path.as_os_str().to_owned());
+    }
+    let output = repo.git(args)?;
+    if !output.status.success() {
+        bail!(
+            "load files changed by commit: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let records = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let mut files = Vec::new();
+    let mut index = 0;
+    while index < records.len() {
+        let status = records[index];
+        index += 1;
+        if status.is_empty() || index >= records.len() {
+            continue;
+        }
+        let kind = status_kind(status[0]);
+        let mut path = PathBuf::from(bytes_to_os_string(records[index]));
+        index += 1;
+        if matches!(status[0], b'R' | b'C') && index < records.len() {
+            path = PathBuf::from(bytes_to_os_string(records[index]));
+            index += 1;
+        }
+        files.push(ChangeEntry { path, kind });
+    }
+    Ok(files)
 }
 
 pub fn load_status(repo: &Repository) -> Result<(Vec<ChangeEntry>, Vec<ChangeEntry>)> {

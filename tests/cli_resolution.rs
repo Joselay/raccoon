@@ -4,7 +4,7 @@ use assert_cmd::Command as AssertCommand;
 use predicates::prelude::*;
 use raccoon::{
     cli::LaunchTarget,
-    dashboard::{ChangeKind, load as load_dashboard},
+    dashboard::{ChangeKind, load as load_dashboard, load_commit_files},
     git_diff,
     repository::Repository,
 };
@@ -120,7 +120,17 @@ fn dashboard_loads_history_branches_and_separated_changes() {
 
     assert_eq!(dashboard.commits.len(), 1);
     assert_eq!(dashboard.commits[0].subject, "initial");
-    assert!(dashboard.branches.iter().any(|branch| branch.current));
+    let current_branch = dashboard
+        .branches
+        .iter()
+        .find(|branch| branch.current)
+        .unwrap();
+    assert_eq!(dashboard.head.branch.as_ref(), Some(&current_branch.name));
+    assert!(dashboard.head.short_id.is_some());
+    let commit_files = load_commit_files(&repository, &dashboard.commits[0].id, None).unwrap();
+    assert!(commit_files.iter().any(|change| {
+        change.path == Path::new("tracked file.txt") && change.kind == ChangeKind::Added
+    }));
     assert!(dashboard.staged.iter().any(|change| {
         change.path == Path::new("staged.txt") && change.kind == ChangeKind::Added
     }));

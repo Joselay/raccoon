@@ -33,15 +33,34 @@ Paths are interpreted relative to the invocation directory, or relative to the s
 
 ## Keys
 
-### Dashboard
+### History
 
 - `Tab`, `←`, `→`: change panel
 - `j`, `k`, arrows, Page Up/Down: move selection
-- `Enter`: inspect selected commit, branch, or changed file
-- `c`: select two branches for comparison
+- `Enter`: inspect the selected commit or file changed by that commit
+- `u`: open uncommitted changes
+- `b`: open the branch picker
+- `c`: open the branch picker with the current branch selected as the comparison base
 - `r`: refresh repository data
 - `t`: preview themes
 - `q`: quit
+
+### Uncommitted changes
+
+- `Tab`, `←`, `→`: switch between staged and unstaged files
+- `j`, `k`, arrows, Page Up/Down: move selection
+- `Enter`: inspect the selected changed file
+- `h`: return to history
+- `b`: open the branch picker
+- `r`: refresh repository data
+- `q`: quit
+
+### Branch picker
+
+- `j`, `k`, arrows, Page Up/Down: move selection
+- `Enter`: inspect the selected branch
+- `c`: select the comparison base and target
+- `b` or `Esc`: close the picker
 
 ### Diff
 
