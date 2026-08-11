@@ -11,8 +11,6 @@ use thiserror::Error;
 use crate::config::{AppConfig, ConfigPaths};
 
 pub const DEFAULT_THEME_NAME: &str = "Night Owl";
-pub const MIN_TEXT_CONTRAST: f64 = 4.5;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rgb {
     pub red: u8,
@@ -96,20 +94,15 @@ pub struct Theme {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiColors {
-    pub background: Rgb,
     pub foreground: Rgb,
-    pub panel: Rgb,
     pub border: Rgb,
     pub focused_border: Rgb,
-    pub selection: Rgb,
-    pub selection_foreground: Rgb,
     pub muted: Rgb,
     pub accent: Rgb,
     pub warning: Rgb,
     pub error: Rgb,
     pub info: Rgb,
     pub search_match: Rgb,
-    pub search_match_foreground: Rgb,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,7 +117,6 @@ pub struct DiffColors {
     pub metadata: Rgb,
     pub addition_background: Rgb,
     pub deletion_background: Rgb,
-    pub selected_background: Rgb,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -165,20 +157,15 @@ macro_rules! refs_struct {
 }
 
 refs_struct!(UiRefs {
-    background,
     foreground,
-    panel,
     border,
     focused_border,
-    selection,
-    selection_foreground,
     muted,
     accent,
     warning,
     error,
     info,
-    search_match,
-    search_match_foreground
+    search_match
 });
 refs_struct!(DiffRefs {
     header,
@@ -190,8 +177,7 @@ refs_struct!(DiffRefs {
     context,
     metadata,
     addition_background,
-    deletion_background,
-    selected_background
+    deletion_background
 });
 refs_struct!(SyntaxRefs {
     comment,
@@ -244,20 +230,15 @@ impl Theme {
             };
         }
         let ui = UiColors {
-            background: color!("ui", file.ui, background),
             foreground: color!("ui", file.ui, foreground),
-            panel: color!("ui", file.ui, panel),
             border: color!("ui", file.ui, border),
             focused_border: color!("ui", file.ui, focused_border),
-            selection: color!("ui", file.ui, selection),
-            selection_foreground: color!("ui", file.ui, selection_foreground),
             muted: color!("ui", file.ui, muted),
             accent: color!("ui", file.ui, accent),
             warning: color!("ui", file.ui, warning),
             error: color!("ui", file.ui, error),
             info: color!("ui", file.ui, info),
             search_match: color!("ui", file.ui, search_match),
-            search_match_foreground: color!("ui", file.ui, search_match_foreground),
         };
         let diff = DiffColors {
             header: color!("diff", file.diff, header),
@@ -270,7 +251,6 @@ impl Theme {
             metadata: color!("diff", file.diff, metadata),
             addition_background: color!("diff", file.diff, addition_background),
             deletion_background: color!("diff", file.diff, deletion_background),
-            selected_background: color!("diff", file.diff, selected_background),
         };
         let syntax = SyntaxColors {
             comment: color!("syntax", file.syntax, comment),
@@ -295,53 +275,19 @@ impl Theme {
             diff,
             syntax,
         };
-        theme.validate_contrast()?;
-        Ok(theme)
-    }
-
-    pub fn validate_contrast(&self) -> Result<(), ThemeError> {
-        self.require_contrast(
-            "ui.foreground",
-            self.ui.foreground,
-            "ui.background",
-            self.ui.background,
-        )?;
-        self.require_contrast(
-            "ui.selection_foreground",
-            self.ui.selection_foreground,
-            "ui.selection",
-            self.ui.selection,
-        )?;
-        self.require_contrast(
-            "ui.search_match_foreground",
-            self.ui.search_match_foreground,
-            "ui.search_match",
-            self.ui.search_match,
-        )?;
-        self.require_contrast(
-            "ui.selection_foreground",
-            self.ui.selection_foreground,
-            "diff.selected_background",
-            self.diff.selected_background,
-        )?;
-        self.require_contrast(
-            "diff.context",
-            self.diff.context,
-            "ui.background",
-            self.ui.background,
-        )?;
-        self.require_contrast(
+        theme.require_contrast(
             "diff.addition",
-            self.diff.addition,
+            theme.diff.addition,
             "diff.addition_background",
-            self.diff.addition_background,
+            theme.diff.addition_background,
         )?;
-        self.require_contrast(
+        theme.require_contrast(
             "diff.deletion",
-            self.diff.deletion,
+            theme.diff.deletion,
             "diff.deletion_background",
-            self.diff.deletion_background,
-        )
+            theme.diff.deletion_background,
+        )?;
+        Ok(theme)
     }
 
     fn require_contrast(
@@ -352,12 +298,11 @@ impl Theme {
         background: Rgb,
     ) -> Result<(), ThemeError> {
         let ratio = foreground.contrast_ratio(background);
-        if ratio < MIN_TEXT_CONTRAST {
+        if ratio < 4.5 {
             Err(ThemeError::InsufficientContrast {
                 foreground: foreground_name,
                 background: background_name,
                 ratio,
-                minimum: MIN_TEXT_CONTRAST,
             })
         } else {
             Ok(())
@@ -384,13 +329,12 @@ pub enum ThemeError {
         reference: String,
     },
     #[error(
-        "insufficient contrast between {foreground} and {background}: {ratio:.2}:1 (minimum {minimum:.1}:1)"
+        "insufficient contrast between {foreground} and {background}: {ratio:.2}:1 (minimum 4.5:1)"
     )]
     InsufficientContrast {
         foreground: &'static str,
         background: &'static str,
         ratio: f64,
-        minimum: f64,
     },
 }
 
@@ -587,28 +531,23 @@ mod tests {
             r##"name = "Test"
 appearance = "{appearance}"
 [palette]
-bg = "#000000"
 fg = "#FFFFFF"
+bg = "#000000"
 red = "#FF8080"
 green = "#80FF80"
 blue = "#80C0FF"
 mid = "#333333"
 yellow = "#FFFF80"
 [ui]
-background="bg"
 foreground="fg"
-panel="bg"
 border="mid"
 focused_border="blue"
-selection="mid"
-selection_foreground="fg"
 muted="fg"
 accent="blue"
 warning="yellow"
 error="red"
 info="blue"
 search_match="yellow"
-search_match_foreground="bg"
 [diff]
 header="blue"
 hunk_header="blue"
@@ -620,7 +559,6 @@ context="fg"
 metadata="fg"
 addition_background="bg"
 deletion_background="bg"
-selected_background="mid"
 [syntax]
 comment="fg"
 keyword="blue"
@@ -662,15 +600,6 @@ invalid="red"
         let missing_semantic = minimal("dark").replace("invalid=\"red\"\n", "");
         let error = Theme::from_toml(&missing_semantic).unwrap_err().to_string();
         assert!(error.contains("missing field") && error.contains("invalid"));
-    }
-
-    #[test]
-    fn rejects_low_contrast() {
-        let source = minimal("dark").replace("fg = \"#FFFFFF\"", "fg = \"#222222\"");
-        assert!(matches!(
-            Theme::from_toml(&source),
-            Err(ThemeError::InsufficientContrast { .. })
-        ));
     }
 
     #[test]

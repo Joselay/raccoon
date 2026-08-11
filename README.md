@@ -55,8 +55,8 @@ Paths are interpreted relative to the invocation directory, or relative to the s
 
 - Indexed files appear in the upper `STAGED` panel; working-tree files appear in the lower `UNSTAGED` panel
 - Both panels use expanded directory trees and share one continuous selection
-- `Tab`: switch between the staged and unstaged panels
-- `j`, `k`, arrows, Page Up/Down: move selection
+- `Tab`: cycle focus through staged files, unstaged files, and the diff preview
+- `j`, `k`, arrows, Page Up/Down: move file selection, or scroll when the diff preview is focused
 - Selecting a file updates the large diff preview automatically
 - `Enter`: focus the selected diff
 - `D`: confirm discarding all tracked working-tree changes; staged changes and untracked files are kept
@@ -89,9 +89,9 @@ Raw patch syntax such as `diff --git`, `index`, `---`, `+++`, `@@` coordinates, 
 
 ## Themes
 
-Night Owl is Raccoon's bundled dark theme and the default. Press `t` to preview custom themes, `Enter` to persist one, or `Esc` to cancel.
+Night Owl is Raccoon's bundled dark theme and the default. Raccoon inherits Ghostty's configured background throughout the main UI; only addition and deletion lines receive semantic diff backgrounds. Press `t` to preview custom themes, `Enter` to persist one, or `Esc` to cancel.
 
-Custom themes are loaded from the platform configuration directory's `themes/` folder. Theme files use named TOML palette references and must provide every UI, diff, and syntax semantic color, declare `appearance = "dark"`, and pass contrast validation. Invalid themes are reported and safely fall back to Night Owl.
+Custom themes are loaded from the platform configuration directory's `themes/` folder. Theme files use named TOML palette references and must provide every UI, diff, and syntax semantic color and declare `appearance = "dark"`. Since the general terminal background is inherited and unknown to Raccoon, choose foreground colors with sufficient contrast against your terminal theme. Addition and deletion foreground/background pairs are contrast-validated. Invalid themes are reported and safely fall back to Night Owl.
 
 See [`assets/themes/night-owl.toml`](assets/themes/night-owl.toml) for the schema.
 

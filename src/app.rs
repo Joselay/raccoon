@@ -46,9 +46,6 @@ impl Colors<'_> {
         }
     }
 
-    fn background(self) -> Color {
-        self.color(self.theme.ui.background)
-    }
     fn foreground(self) -> Color {
         self.color(self.theme.ui.foreground)
     }
@@ -61,12 +58,6 @@ impl Colors<'_> {
     fn border(self) -> Color {
         self.color(self.theme.ui.border)
     }
-    fn selection_foreground(self) -> Color {
-        self.color(self.theme.ui.selection_foreground)
-    }
-    fn panel(self) -> Color {
-        self.color(self.theme.ui.panel)
-    }
     fn focused_border(self) -> Color {
         self.color(self.theme.ui.focused_border)
     }
@@ -78,6 +69,7 @@ enum Focus {
     CommitFiles,
     Staged,
     Unstaged,
+    Diff,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +87,7 @@ struct AppState {
     screen: Screen,
     dashboard_page: DashboardPage,
     focus: Focus,
+    preview_focus: Focus,
     data: Option<DashboardData>,
     dashboard_error: Option<String>,
     diff: Option<DiffDocument>,
@@ -159,6 +152,7 @@ impl AppState {
             screen,
             dashboard_page,
             focus,
+            preview_focus: focus,
             data: None,
             dashboard_error: None,
             diff: None,
@@ -225,9 +219,11 @@ impl AppState {
             };
             if next < staged_len {
                 self.focus = Focus::Staged;
+                self.preview_focus = Focus::Staged;
                 self.staged_selection = next;
             } else {
                 self.focus = Focus::Unstaged;
+                self.preview_focus = Focus::Unstaged;
                 self.unstaged_selection = next.saturating_sub(staged_len);
             }
             return current != next;
@@ -237,6 +233,7 @@ impl AppState {
             Focus::CommitFiles => (&mut self.commit_file_selection, self.commit_files.len()),
             Focus::Staged => (&mut self.staged_selection, data.staged.len()),
             Focus::Unstaged => (&mut self.unstaged_selection, data.unstaged.len()),
+            Focus::Diff => return false,
         };
         let previous = *selection;
         if len == 0 {
@@ -262,19 +259,34 @@ impl AppState {
                         .as_ref()
                         .is_some_and(|data| !data.unstaged.is_empty()) =>
                 {
+                    self.preview_focus = Focus::Unstaged;
                     Focus::Unstaged
                 }
-                Focus::Unstaged
+                Focus::Staged => {
+                    self.preview_focus = Focus::Staged;
+                    Focus::Diff
+                }
+                Focus::Unstaged => {
+                    self.preview_focus = Focus::Unstaged;
+                    Focus::Diff
+                }
+                Focus::Diff
                     if self
                         .data
                         .as_ref()
                         .is_some_and(|data| !data.staged.is_empty()) =>
                 {
+                    self.preview_focus = Focus::Staged;
                     Focus::Staged
                 }
-                Focus::Staged => Focus::Staged,
-                Focus::Unstaged => Focus::Unstaged,
-                _ => Focus::Staged,
+                Focus::Diff => {
+                    self.preview_focus = Focus::Unstaged;
+                    Focus::Unstaged
+                }
+                _ => {
+                    self.preview_focus = Focus::Staged;
+                    Focus::Staged
+                }
             },
         };
     }
@@ -313,6 +325,20 @@ impl AppState {
                     }
                 })
             }
+            Focus::Diff => match self.preview_focus {
+                Focus::Staged => {
+                    selected_tree_entry(&data.staged, self.staged_selection).map(|change| {
+                        LaunchTarget::Staged {
+                            path: change.path.clone(),
+                        }
+                    })
+                }
+                _ => selected_tree_entry(&data.unstaged, self.unstaged_selection).map(|change| {
+                    LaunchTarget::WorkingTree {
+                        path: change.path.clone(),
+                    }
+                }),
+            },
         }
     }
 
@@ -413,11 +439,13 @@ where
                                 && !data.staged.is_empty()
                             {
                                 state.focus = Focus::Staged;
+                                state.preview_focus = Focus::Staged;
                             } else if state.focus == Focus::Staged
                                 && data.staged.is_empty()
                                 && !data.unstaged.is_empty()
                             {
                                 state.focus = Focus::Unstaged;
+                                state.preview_focus = Focus::Unstaged;
                             }
                         }
                         state.history_selection = state
@@ -806,7 +834,9 @@ where
                     }
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
-                    if state.move_selection(1) {
+                    if state.focus == Focus::Diff {
+                        state.diff_scroll = state.diff_scroll.saturating_add(1);
+                    } else if state.move_selection(1) {
                         refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
@@ -818,7 +848,9 @@ where
                     }
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    if state.move_selection(-1) {
+                    if state.focus == Focus::Diff {
+                        state.diff_scroll = state.diff_scroll.saturating_sub(1);
+                    } else if state.move_selection(-1) {
                         refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
@@ -830,7 +862,9 @@ where
                     }
                 }
                 KeyCode::PageDown => {
-                    if state.move_selection(10) {
+                    if state.focus == Focus::Diff {
+                        state.diff_scroll = state.diff_scroll.saturating_add(20);
+                    } else if state.move_selection(10) {
                         refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
@@ -842,7 +876,9 @@ where
                     }
                 }
                 KeyCode::PageUp => {
-                    if state.move_selection(-10) {
+                    if state.focus == Focus::Diff {
+                        state.diff_scroll = state.diff_scroll.saturating_sub(20);
+                    } else if state.move_selection(-10) {
                         refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
@@ -854,7 +890,9 @@ where
                     }
                 }
                 KeyCode::Home | KeyCode::Char('g') => {
-                    if state.move_selection(isize::MIN) {
+                    if state.focus == Focus::Diff {
+                        state.diff_scroll = 0;
+                    } else if state.move_selection(isize::MIN) {
                         refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
@@ -866,7 +904,9 @@ where
                     }
                 }
                 KeyCode::End | KeyCode::Char('G') => {
-                    if state.move_selection(isize::MAX) {
+                    if state.focus == Focus::Diff {
+                        state.diff_scroll = usize::MAX;
+                    } else if state.move_selection(isize::MAX) {
                         refresh_dashboard_preview(
                             &mut state,
                             &git_worker,
@@ -927,6 +967,7 @@ where
                     } else {
                         Focus::Unstaged
                     };
+                    state.preview_focus = state.focus;
                     request_change_preview(
                         &mut state,
                         &git_worker,
@@ -1073,7 +1114,7 @@ fn request_change_preview(
     next_request_id: &mut u64,
     current_request: &mut Option<u64>,
 ) -> Result<()> {
-    if !matches!(state.focus, Focus::Staged | Focus::Unstaged) {
+    if !matches!(state.focus, Focus::Staged | Focus::Unstaged | Focus::Diff) {
         return Ok(());
     }
     let Some(target) = state.selected_target() else {
@@ -1180,10 +1221,10 @@ fn request_commit_files(
 
 fn render(frame: &mut ratatui::Frame<'_>, state: &AppState) {
     let colors = state.colors();
-    let background = Style::default()
-        .fg(colors.foreground())
-        .bg(colors.background());
-    frame.render_widget(Block::default().style(background), frame.area());
+    frame.render_widget(
+        Block::default().style(Style::default().fg(colors.foreground())),
+        frame.area(),
+    );
     let areas = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
     match &state.screen {
         Screen::Dashboard => render_dashboard(frame, areas[0], state),
@@ -1194,7 +1235,7 @@ fn render(frame: &mut ratatui::Frame<'_>, state: &AppState) {
             " q quit  u changes  Tab panels  j/k move  Enter open  b branches  c compare  live updates"
         }
         (Screen::Dashboard, DashboardPage::Changes) => {
-            " q quit  h history  j/k select  Enter diff  D discard changes  b branches  live updates"
+            " q quit  h history  Tab focus  j/k select or scroll  Enter diff  D discard changes  b branches"
         }
         (Screen::Diff { direct: true, .. }, _) => {
             " q quit  j/k scroll  n/N hunks  [/] files  / search  s/S matches  t themes"
@@ -1215,7 +1256,7 @@ fn render(frame: &mut ratatui::Frame<'_>, state: &AppState) {
             .unwrap_or(help)
     };
     frame.render_widget(
-        Paragraph::new(footer).style(Style::default().fg(colors.muted()).bg(colors.background())),
+        Paragraph::new(footer).style(Style::default().fg(colors.muted())),
         areas[1],
     );
     if state.branch_picker {
@@ -1290,8 +1331,8 @@ fn render_change_preview(frame: &mut ratatui::Frame<'_>, area: Rect, state: &App
         let colors = state.colors();
         frame.render_widget(
             Paragraph::new("No changed file selected.\n\nYour working tree is clean.")
-                .style(Style::default().fg(colors.muted()).bg(colors.background()))
-                .block(diff_block(colors)),
+                .style(Style::default().fg(colors.muted()))
+                .block(diff_block(colors, state.focus == Focus::Diff)),
             area,
         );
     } else {
@@ -1603,25 +1644,17 @@ fn render_rows<T: Into<String>>(
                     if selected { "▎ " } else { "  " },
                     if selected {
                         Style::default()
-                            .fg(colors.selection_foreground())
-                            .bg(colors.color(colors.theme.ui.selection))
+                            .fg(colors.accent())
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(colors.muted()).bg(colors.panel())
+                        Style::default().fg(colors.muted())
                     },
                 ));
                 spans.extend(row.spans.iter().cloned().map(|mut span| {
                     let selection_style = if selected {
-                        let mut style =
-                            Style::default().bg(colors.color(colors.theme.ui.selection));
-                        if span.style.fg == Some(colors.foreground()) {
-                            style = style
-                                .fg(colors.selection_foreground())
-                                .add_modifier(Modifier::BOLD);
-                        }
-                        style
+                        Style::default().add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().bg(colors.panel())
+                        Style::default()
                     };
                     span.style = span.style.patch(selection_style);
                     span
@@ -1650,26 +1683,22 @@ fn render_rows<T: Into<String>>(
                 } else {
                     Modifier::empty()
                 }),
-        )
-        .style(Style::default().bg(colors.panel()));
+        );
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
     let colors = state.colors();
+    let focused = matches!(state.screen, Screen::Diff { .. }) || state.focus == Focus::Diff;
     if let Some(message) = &state.diff_error {
         frame.render_widget(
             Paragraph::new(format!("Git error\n\n{message}"))
-                .style(
-                    Style::default()
-                        .fg(colors.color(colors.theme.ui.error))
-                        .bg(colors.background()),
-                )
-                .block(diff_block(colors)),
+                .style(Style::default().fg(colors.color(colors.theme.ui.error)))
+                .block(diff_block(colors, focused)),
             area,
         );
     } else if let Some(document) = &state.diff {
-        let available = area.height.saturating_sub(1) as usize;
+        let available = area.height.saturating_sub(2) as usize;
         let scroll = state
             .diff_scroll
             .min(document.lines.len().saturating_sub(available));
@@ -1693,34 +1722,30 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                     state.search_matches.get(state.search_match_index) == Some(&line_index);
                 if is_active_match {
                     style = style
-                        .fg(colors.selection_foreground())
-                        .bg(colors.color(colors.theme.diff.selected_background));
+                        .fg(colors.accent())
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
                 } else if is_search_match {
                     style = style
-                        .fg(colors.color(colors.theme.ui.search_match_foreground))
-                        .bg(colors.color(colors.theme.ui.search_match));
+                        .fg(colors.color(colors.theme.ui.search_match))
+                        .add_modifier(Modifier::UNDERLINED);
                 }
-                let gutter_background = style.bg.unwrap_or(colors.background());
+                let gutter_background = style.bg;
                 let highlighted_foreground = is_search_match.then_some(
                     style
                         .fg
                         .expect("search match styles always define a foreground"),
                 );
+                let mut line_number_style = Style::default().fg(highlighted_foreground
+                    .unwrap_or_else(|| colors.color(colors.theme.diff.line_number)));
+                let mut gutter_style = Style::default().fg(highlighted_foreground
+                    .unwrap_or_else(|| colors.color(colors.theme.diff.gutter)));
+                if let Some(background) = gutter_background {
+                    line_number_style = line_number_style.bg(background);
+                    gutter_style = gutter_style.bg(background);
+                }
                 let mut spans = vec![
-                    Span::styled(
-                        line_numbers,
-                        Style::default()
-                            .fg(highlighted_foreground
-                                .unwrap_or_else(|| colors.color(colors.theme.diff.line_number)))
-                            .bg(gutter_background),
-                    ),
-                    Span::styled(
-                        " │ ",
-                        Style::default()
-                            .fg(highlighted_foreground
-                                .unwrap_or_else(|| colors.color(colors.theme.diff.gutter)))
-                            .bg(gutter_background),
-                    ),
+                    Span::styled(line_numbers, line_number_style),
+                    Span::styled(" │ ", gutter_style),
                 ];
                 let text = document.line_text(line);
                 let content_offset = diff_content_offset(line.kind, text);
@@ -1755,53 +1780,41 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                 } else {
                     spans.push(Span::styled(&text[content_offset..], style));
                 }
-                // Paragraph truncates overflowing spans, so this paints the
-                // semantic background through the right edge of the viewport.
-                spans.push(Span::styled(" ".repeat(area.width as usize), style));
+                if style.bg.is_some() {
+                    spans.push(Span::styled(" ".repeat(area.width as usize), style));
+                }
                 Line::from(spans)
             })
             .collect::<Vec<_>>();
         let paragraph = if lines.is_empty() {
             Paragraph::new("No differences.")
-                .style(
-                    Style::default()
-                        .fg(colors.foreground())
-                        .bg(colors.background()),
-                )
-                .block(diff_block(colors))
+                .style(Style::default().fg(colors.foreground()))
+                .block(diff_block(colors, focused))
         } else {
             Paragraph::new(lines)
-                .style(
-                    Style::default()
-                        .fg(colors.foreground())
-                        .bg(colors.background()),
-                )
-                .block(diff_block(colors))
+                .style(Style::default().fg(colors.foreground()))
+                .block(diff_block(colors, focused))
         };
         frame.render_widget(paragraph, area);
     } else {
         frame.render_widget(
             Paragraph::new("Loading diff…")
-                .style(
-                    Style::default()
-                        .fg(colors.foreground())
-                        .bg(colors.background()),
-                )
-                .block(diff_block(colors)),
+                .style(Style::default().fg(colors.foreground()))
+                .block(diff_block(colors, focused)),
             area,
         );
     }
 }
 
-fn diff_block(colors: Colors<'_>) -> Block<'static> {
+fn diff_block(colors: Colors<'_>, focused: bool) -> Block<'static> {
     Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(colors.focused_border()))
-        .style(
-            Style::default()
-                .fg(colors.foreground())
-                .bg(colors.background()),
-        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if focused {
+            colors.focused_border()
+        } else {
+            colors.border()
+        }))
+        .style(Style::default().fg(colors.foreground()))
 }
 
 fn is_visible_diff_line(kind: LineKind) -> bool {
@@ -1859,8 +1872,7 @@ fn panel<'a>(
                     } else {
                         Modifier::empty()
                     }),
-            )
-            .style(Style::default().bg(colors.panel())),
+            ),
     )
 }
 
@@ -1868,11 +1880,7 @@ fn error_panel<'a>(title: &'a str, message: &'a str, colors: Colors<'_>) -> Para
     panel(
         title,
         true,
-        Paragraph::new(message).style(
-            Style::default()
-                .fg(colors.color(colors.theme.ui.error))
-                .bg(colors.background()),
-        ),
+        Paragraph::new(message).style(Style::default().fg(colors.color(colors.theme.ui.error))),
         colors,
     )
 }
@@ -1913,37 +1921,23 @@ fn line_style(kind: LineKind, colors: Colors<'_>) -> Style {
         LineKind::Deletion => Style::default()
             .fg(colors.color(colors.theme.diff.deletion))
             .bg(colors.color(colors.theme.diff.deletion_background)),
-        LineKind::HunkHeader => Style::default()
-            .fg(colors.color(colors.theme.diff.hunk_header))
-            .bg(colors.color(colors.theme.ui.panel)),
+        LineKind::HunkHeader => Style::default().fg(colors.color(colors.theme.diff.hunk_header)),
         LineKind::FileHeader => Style::default()
             .fg(colors.color(colors.theme.diff.header))
-            .add_modifier(Modifier::BOLD)
-            .bg(colors.color(colors.theme.ui.panel)),
-        LineKind::Context => Style::default()
-            .fg(colors.color(colors.theme.diff.context))
-            .bg(colors.background()),
-        LineKind::Metadata => Style::default()
-            .fg(colors.color(colors.theme.diff.metadata))
-            .bg(colors.background()),
+            .add_modifier(Modifier::BOLD),
+        LineKind::Context => Style::default().fg(colors.color(colors.theme.diff.context)),
+        LineKind::Metadata => Style::default().fg(colors.color(colors.theme.diff.metadata)),
         LineKind::Binary => Style::default()
             .fg(colors.color(colors.theme.ui.warning))
-            .bg(colors.color(colors.theme.ui.panel))
             .add_modifier(Modifier::BOLD),
-        LineKind::Rename => Style::default()
-            .fg(colors.color(colors.theme.ui.info))
-            .bg(colors.background()),
+        LineKind::Rename => Style::default().fg(colors.color(colors.theme.ui.info)),
         LineKind::NewFile => Style::default()
             .fg(colors.color(colors.theme.diff.addition))
-            .bg(colors.background())
             .add_modifier(Modifier::BOLD),
         LineKind::DeletedFile => Style::default()
             .fg(colors.color(colors.theme.diff.deletion))
-            .bg(colors.background())
             .add_modifier(Modifier::BOLD),
-        LineKind::NoNewline => Style::default()
-            .fg(colors.color(colors.theme.ui.warning))
-            .bg(colors.background()),
+        LineKind::NoNewline => Style::default().fg(colors.color(colors.theme.ui.warning)),
     }
 }
 
@@ -1982,10 +1976,6 @@ fn render_branch_picker(frame: &mut ratatui::Frame<'_>, content_area: Rect, stat
     ])
     .split(vertical[1])[1];
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(colors.background())),
-        area,
-    );
     let Some(data) = &state.data else {
         frame.render_widget(
             panel(
@@ -2072,10 +2062,6 @@ fn render_theme_picker(frame: &mut ratatui::Frame<'_>, state: &AppState) {
     ])
     .split(vertical[1])[1];
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(colors.background())),
-        area,
-    );
     let inner = area.inner(ratatui::layout::Margin {
         horizontal: 2,
         vertical: 1,
@@ -2107,12 +2093,9 @@ fn render_theme_picker(frame: &mut ratatui::Frame<'_>, state: &AppState) {
                 if index == state.theme_index {
                     Style::default()
                         .fg(colors.accent())
-                        .bg(colors.background())
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default()
-                        .fg(colors.foreground())
-                        .bg(colors.background())
+                    Style::default().fg(colors.foreground())
                 },
             )
         })
@@ -2122,8 +2105,7 @@ fn render_theme_picker(frame: &mut ratatui::Frame<'_>, state: &AppState) {
             Block::default()
                 .title(" Themes — ↑/↓ preview, Enter confirm, Esc cancel ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(colors.accent()))
-                .style(Style::default().bg(colors.background())),
+                .border_style(Style::default().fg(colors.accent())),
         ),
         inner,
     );
@@ -2172,8 +2154,7 @@ fn render_discard_confirmation(frame: &mut ratatui::Frame<'_>, state: &AppState)
             Block::default()
                 .title(" Confirm discard ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(warning))
-                .style(Style::default().bg(colors.background())),
+                .border_style(Style::default().fg(warning)),
         ),
         area,
     );
