@@ -1255,7 +1255,7 @@ fn render_change_preview(frame: &mut ratatui::Frame<'_>, area: Rect, state: &App
         frame.render_widget(
             Paragraph::new("No changed file selected.\n\nYour working tree is clean.")
                 .style(Style::default().fg(colors.muted()).bg(colors.background()))
-                .block(diff_block(" Diff preview ", colors)),
+                .block(diff_block(colors)),
             area,
         );
     } else {
@@ -1714,7 +1714,7 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                         .fg(colors.color(colors.theme.ui.error))
                         .bg(colors.background()),
                 )
-                .block(diff_block(" Diff ", colors)),
+                .block(diff_block(colors)),
             area,
         );
     } else if let Some(document) = &state.diff {
@@ -1722,7 +1722,6 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
         let scroll = state
             .diff_scroll
             .min(document.lines.len().saturating_sub(available));
-        let title = diff_file_title(document, scroll, diff_scope_label(state));
         let lines = document
             .lines
             .iter()
@@ -1818,7 +1817,7 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                         .fg(colors.foreground())
                         .bg(colors.background()),
                 )
-                .block(diff_block(&title, colors))
+                .block(diff_block(colors))
         } else {
             Paragraph::new(lines)
                 .style(
@@ -1826,7 +1825,7 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                         .fg(colors.foreground())
                         .bg(colors.background()),
                 )
-                .block(diff_block(&title, colors))
+                .block(diff_block(colors))
         };
         frame.render_widget(paragraph, area);
     } else {
@@ -1837,15 +1836,14 @@ fn render_diff(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
                         .fg(colors.foreground())
                         .bg(colors.background()),
                 )
-                .block(diff_block(" Diff ", colors)),
+                .block(diff_block(colors)),
             area,
         );
     }
 }
 
-fn diff_block<'a>(title: &'a str, colors: Colors<'_>) -> Block<'a> {
+fn diff_block(colors: Colors<'_>) -> Block<'static> {
     Block::default()
-        .title(title)
         .borders(Borders::TOP)
         .border_style(Style::default().fg(colors.focused_border()))
         .style(
@@ -1853,41 +1851,6 @@ fn diff_block<'a>(title: &'a str, colors: Colors<'_>) -> Block<'a> {
                 .fg(colors.foreground())
                 .bg(colors.background()),
         )
-}
-
-fn diff_file_title(document: &DiffDocument, scroll: usize, scope: Option<&str>) -> String {
-    let Some(file_index) = document.lines.get(scroll).and_then(|line| line.file_index) else {
-        return " Diff ".to_owned();
-    };
-    let path = document
-        .files
-        .get(file_index)
-        .and_then(|path| path.as_deref())
-        .map(|path| path.to_string_lossy())
-        .unwrap_or_else(|| "<unknown file>".into());
-    let scope = scope.map(|scope| format!("{scope} · ")).unwrap_or_default();
-    format!(
-        " {scope}File {}/{} — {} ",
-        file_index + 1,
-        document.files.len(),
-        path
-    )
-}
-
-fn diff_scope_label(state: &AppState) -> Option<&'static str> {
-    match &state.screen {
-        Screen::Dashboard if state.dashboard_page == DashboardPage::Changes => match state.focus {
-            Focus::Staged => Some("Staged · HEAD → index"),
-            Focus::Unstaged => Some("Changes · index → working tree"),
-            _ => None,
-        },
-        Screen::Diff { target, .. } => match target {
-            LaunchTarget::Staged { .. } => Some("Staged · HEAD → index"),
-            LaunchTarget::WorkingTree { .. } => Some("Changes · index → working tree"),
-            _ => None,
-        },
-        Screen::Dashboard => None,
-    }
 }
 
 fn is_visible_diff_line(kind: LineKind) -> bool {
